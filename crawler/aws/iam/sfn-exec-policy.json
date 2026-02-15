@@ -1,0 +1,49 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "lambda:InvokeFunction"
+      ],
+      "Resource": [
+        "arn:aws:lambda:ap-northeast-2:__ACCOUNT_ID__:function:partsro-extractor",
+        "arn:aws:lambda:ap-northeast-2:__ACCOUNT_ID__:function:partsro-worker",
+        "arn:aws:lambda:ap-northeast-2:__ACCOUNT_ID__:function:partsro-reducer",
+        "arn:aws:lambda:ap-northeast-2:__ACCOUNT_ID__:function:hyunki-store-extractor",
+        "arn:aws:lambda:ap-northeast-2:__ACCOUNT_ID__:function:hyunki-store-worker",
+        "arn:aws:lambda:ap-northeast-2:__ACCOUNT_ID__:function:hyunki-store-reducer",
+        "arn:aws:lambda:ap-northeast-2:__ACCOUNT_ID__:function:hyunki-market-extractor",
+        "arn:aws:lambda:ap-northeast-2:__ACCOUNT_ID__:function:hyunki-market-worker",
+        "arn:aws:lambda:ap-northeast-2:__ACCOUNT_ID__:function:hyunki-market-reducer"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": "arn:aws:s3:::maintenance-parts-source/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "states:StartExecution"
+      ],
+      "Resource": [
+        "arn:aws:states:ap-northeast-2:__ACCOUNT_ID__:stateMachine:partsro-pipeline",
+        "arn:aws:states:ap-northeast-2:__ACCOUNT_ID__:stateMachine:hyunki-store-pipeline",
+        "arn:aws:states:ap-northeast-2:__ACCOUNT_ID__:stateMachine:hyunki-market-pipeline"
+      ]
+    }
+  ]
+}
