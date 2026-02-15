@@ -1,0 +1,107 @@
+{
+  "Comment": "Hyunki Store extraction -> map workers -> reduce CSV",
+  "StartAt": "ExtractUrls",
+  "States": {
+    "ExtractUrls": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "__HYUNKI_STORE_EXTRACTOR_ARN__",
+        "Payload": {
+          "bucket.$": "$.bucket",
+          "key_prefix.$": "$.urls_prefix",
+          "run_id.$": "$.run_id",
+          "list_url.$": "$.list_url",
+          "category_urls.$": "$.category_urls",
+          "max_pages.$": "$.max_pages",
+          "count.$": "$.count",
+          "supplier_code.$": "$.supplier_code"
+        }
+      },
+      "ResultSelector": {
+        "payload.$": "$.Payload"
+      },
+      "ResultPath": "$.extract",
+      "Next": "MapUrls"
+    },
+    "MapUrls": {
+      "Type": "Map",
+      "ItemReader": {
+        "Resource": "arn:aws:states:::s3:getObject",
+        "Parameters": {
+          "Bucket.$": "$.extract.payload.s3_bucket",
+          "Key.$": "$.extract.payload.urls_key"
+        },
+        "ReaderConfig": {
+          "InputType": "JSON"
+        }
+      },
+      "ItemBatcher": {
+        "MaxItemsPerBatch": 100
+      },
+      "ItemSelector": {
+        "urls.$": "$$.Map.Item.Value",
+        "batch_index.$": "$$.Map.Item.Index",
+        "run_id.$": "$$.Execution.Input.run_id",
+        "run_id_fallback.$": "$.extract.payload.run_id",
+        "execution_name.$": "$$.Execution.Name",
+        "bucket.$": "$$.Execution.Input.bucket",
+        "key_prefix.$": "$$.Execution.Input.result_prefix",
+        "skip_prefix.$": "$$.Execution.Input.skip_prefix",
+        "extracted_at.$": "$$.Execution.StartTime"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "STANDARD"
+        },
+        "StartAt": "Worker",
+        "States": {
+          "Worker": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "__HYUNKI_STORE_WORKER_ARN__",
+              "Payload.$": "$"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.TooManyRequestsException",
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 6,
+                "BackoffRate": 2.0
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "MaxConcurrency": 50,
+      "ResultPath": null,
+      "Next": "ReduceResults"
+    },
+    "ReduceResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "__HYUNKI_STORE_REDUCER_ARN__",
+        "Payload": {
+          "run_id.$": "$.extract.payload.run_id",
+          "bucket.$": "$.bucket",
+          "result_prefix.$": "$.result_prefix",
+          "final_prefix.$": "$.final_prefix"
+        }
+      },
+      "ResultSelector": {
+        "payload.$": "$.Payload"
+      },
+      "ResultPath": "$.reduce",
+      "End": true
+    }
+  }
+}
