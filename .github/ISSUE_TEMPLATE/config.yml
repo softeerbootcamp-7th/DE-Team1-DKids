@@ -1,0 +1,18 @@
+blank_issues_enabled: false
+
+issue_templates:
+  - name: 🐛 Bug Report
+    description: 버그 리포트 이슈 템플릿
+    file: bug_report.md
+
+  - name: ✨ Feature Request
+    description: 기능 추가 이슈 템플릿
+    file: feature_request.md
+
+  - name: ♻️ Refactor
+    description: 리팩토링 관련 이슈 템플릿
+    file: refactor.md
+
+  - name: ❓ question
+    description: 논의/질문 이슈 템플릿
+    file: question.md

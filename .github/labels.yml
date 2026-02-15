@@ -1,0 +1,39 @@
+- name: "🐛 bug"
+  description: "Something isn't working"
+  color: "53F068"
+
+- name: "🚀 ci"
+  description: "ci"
+  color: "7057ff"
+
+- name: "📝 docs"
+  description: "Improvements or additions to documentation"
+  color: "0075ca"
+
+- name: "✨ feature"
+  description: "New feature or request"
+  color: "a2eeef"
+
+- name: "🚨 hotfix"
+  description: "hotfix"
+  color: "FB825E"
+
+- name: "♻️ refactor"
+  description: "code refactoring"
+  color: "008672"
+
+- name: "❓ question"
+  description: "Technical question or discussion topic"
+  color: "cc317c"
+
+- name: "✅ test"
+  description: "Adding or improving tests"
+  color: "f9d0c4"
+
+- name: "📈 enhancement"
+  description: "Improving existing features"
+  color: "84b6eb"
+
+- name: "🧹 chore"
+  description: "Maintenance tasks like build, configs, and housekeeping"
+  color: "fef2c0"
