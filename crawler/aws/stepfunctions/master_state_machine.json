@@ -1,0 +1,90 @@
+{
+  "Comment": "Master pipeline: run all source pipelines in parallel",
+  "StartAt": "RunAllSources",
+  "States": {
+    "RunAllSources": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "PartsroPipeline",
+          "States": {
+            "PartsroPipeline": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync",
+              "Parameters": {
+                "StateMachineArn": "__PARTSRO_STATE_MACHINE_ARN__",
+                "Input.$": "$.partsro"
+              },
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "ResultPath": "$.partsro_error",
+                  "Next": "PartsroDone"
+                }
+              ],
+              "Next": "PartsroDone"
+            },
+            "PartsroDone": {
+              "Type": "Succeed"
+            }
+          }
+        },
+        {
+          "StartAt": "HyunkiStorePipeline",
+          "States": {
+            "HyunkiStorePipeline": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync",
+              "Parameters": {
+                "StateMachineArn": "__HYUNKI_STORE_STATE_MACHINE_ARN__",
+                "Input.$": "$.hyunki_store"
+              },
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "ResultPath": "$.hyunki_store_error",
+                  "Next": "HyunkiStoreDone"
+                }
+              ],
+              "Next": "HyunkiStoreDone"
+            },
+            "HyunkiStoreDone": {
+              "Type": "Succeed"
+            }
+          }
+        },
+        {
+          "StartAt": "HyunkiMarketPipeline",
+          "States": {
+            "HyunkiMarketPipeline": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::states:startExecution.sync",
+              "Parameters": {
+                "StateMachineArn": "__HYUNKI_MARKET_STATE_MACHINE_ARN__",
+                "Input.$": "$.hyunki_market"
+              },
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "ResultPath": "$.hyunki_market_error",
+                  "Next": "HyunkiMarketDone"
+                }
+              ],
+              "Next": "HyunkiMarketDone"
+            },
+            "HyunkiMarketDone": {
+              "Type": "Succeed"
+            }
+          }
+        }
+      ],
+      "End": true
+    }
+  }
+}

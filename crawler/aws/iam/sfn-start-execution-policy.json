@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "states:StartExecution",
+        "states:DescribeExecution",
+        "states:StopExecution"
+      ],
+      "Resource": "arn:aws:states:ap-northeast-2:__ACCOUNT_ID__:stateMachine:partsro-pipeline"
+    }
+  ]
+}
