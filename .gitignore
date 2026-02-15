@@ -1,0 +1,56 @@
+### OS / Editor ###
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+### Python ###
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+coverage.xml
+htmlcov/
+
+### Virtual environments ###
+.venv/
+venv/
+env/
+
+### Environment files ###
+.env
+.env.*
+*.env
+
+### Logs ###
+*.log
+*.har
+
+### Local tooling ###
+.cache/
+.terraform/
+
+### API Keys / Credentials ###
+*.key
+*.pem
+*.crt
+secrets/
+credentials/
+
+### Data ###
+data/*.csv
+data/*.json
+**/data/
+
+### Docker ###
+*.tar
