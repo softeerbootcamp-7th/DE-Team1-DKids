@@ -127,9 +127,11 @@ def main() -> None:
         if args.canonical_output:
             canonical.write.mode("overwrite").parquet(args.canonical_output)
     else:
-        summary.write.mode("overwrite").option("header", "true").csv(args.output)
+        summary.coalesce(1).write.mode("overwrite").option("header", "true").csv(
+            args.output
+        )
         if args.canonical_output:
-            canonical.write.mode("overwrite").option("header", "true").csv(
+            canonical.coalesce(1).write.mode("overwrite").option("header", "true").csv(
                 args.canonical_output
             )
 
