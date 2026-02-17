@@ -1,0 +1,4 @@
+apache-airflow==2.9.3
+apache-airflow-providers-amazon==9.5.0
+apache-airflow-providers-slack==8.4.0
+pymysql==1.1.1
