@@ -35,6 +35,11 @@ env/
 ### Logs ###
 *.log
 *.har
+airflow/logs/
+
+### Airflow runtime ###
+airflow/dags/__pycache__/
+airflow/airflow-webserver.pid
 
 ### Local tooling ###
 .cache/
