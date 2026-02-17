@@ -10,9 +10,11 @@ from airflow import DAG
 from airflow.decorators import task
 from airflow.models import Variable
 from airflow.operators.python import get_current_context
+from airflow.providers.amazon.aws.operators.emr import EmrAddStepsOperator
 from airflow.providers.amazon.aws.operators.step_function import (
     StepFunctionStartExecutionOperator,
 )
+from airflow.providers.amazon.aws.sensors.emr import EmrStepSensor
 from airflow.providers.amazon.aws.sensors.step_function import StepFunctionExecutionSensor
 from airflow.providers.slack.operators.slack_webhook import SlackWebhookOperator
 
@@ -33,6 +35,10 @@ def _resolve_effective_ds(context):
 
 def _now_utc_str() -> str:
     return pendulum.now("UTC").strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _norm_s3_prefix(prefix: str) -> str:
+    return prefix.rstrip("/") if prefix else prefix
 
 
 def _list_keys(s3, bucket: str, prefix: str) -> Iterable[str]:
@@ -120,7 +126,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["crawler"],
+    tags=["crawler", "emr"],
 ) as dag:
 
     @task
@@ -295,6 +301,112 @@ with DAG(
 
         return "\n".join(lines)
 
+    @task
+    def build_emr_steps() -> list:
+        context = get_current_context()
+        effective_ds, _, _ = _resolve_effective_ds(context)
+
+        code_prefix = _norm_s3_prefix(Variable.get("CODE_S3_PREFIX"))
+        raw_prefix = _norm_s3_prefix(Variable.get("RAW_S3_PREFIX"))
+        clean_prefix = _norm_s3_prefix(Variable.get("CLEAN_S3_PREFIX"))
+        mart_prefix = _norm_s3_prefix(Variable.get("MART_S3_PREFIX"))
+
+        return [
+            {
+                "Name": "partsro_clean",
+                "ActionOnFailure": "CONTINUE",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": [
+                        "spark-submit",
+                        f"{code_prefix}/preprocess_partsro.py",
+                        "--input",
+                        f"{raw_prefix}/partsro/final/dt={effective_ds}/",
+                        "--output",
+                        f"{clean_prefix}/partsro/dt={effective_ds}/",
+                        "--dt",
+                        effective_ds,
+                    ],
+                },
+            },
+            {
+                "Name": "hyunki_store_clean",
+                "ActionOnFailure": "CONTINUE",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": [
+                        "spark-submit",
+                        f"{code_prefix}/preprocess_hyunki_store.py",
+                        "--input",
+                        f"{raw_prefix}/hyunki_store/final/dt={effective_ds}/",
+                        "--output",
+                        f"{clean_prefix}/hyunki_store/dt={effective_ds}/",
+                        "--dt",
+                        effective_ds,
+                    ],
+                },
+            },
+            {
+                "Name": "hyunki_market_clean",
+                "ActionOnFailure": "CONTINUE",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": [
+                        "spark-submit",
+                        f"{code_prefix}/preprocess_hyunki_market.py",
+                        "--input",
+                        f"{raw_prefix}/hyunki_market/final/dt={effective_ds}/",
+                        "--output",
+                        f"{clean_prefix}/hyunki_market/dt={effective_ds}/",
+                        "--dt",
+                        effective_ds,
+                    ],
+                },
+            },
+            {
+                "Name": "normalize_car_type",
+                "ActionOnFailure": "CONTINUE",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": [
+                        "spark-submit",
+                        f"{code_prefix}/normalize_car_type.py",
+                        "--input",
+                        f"{clean_prefix}/partsro/dt={effective_ds}/,"
+                        f"{clean_prefix}/hyunki_store/dt={effective_ds}/,"
+                        f"{clean_prefix}/hyunki_market/dt={effective_ds}/",
+                        "--output",
+                        f"{clean_prefix}/normalized/dt={effective_ds}/",
+                        "--format",
+                        "parquet",
+                    ],
+                },
+            },
+            {
+                "Name": "name_price_summary",
+                "ActionOnFailure": "CONTINUE",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": [
+                        "spark-submit",
+                        f"{code_prefix}/build_name_price_summary.py",
+                        "--input",
+                        f"{clean_prefix}/normalized/dt={effective_ds}/",
+                        "--format",
+                        "parquet",
+                        "--output",
+                        f"{mart_prefix}/name_price_summary/dt={effective_ds}/",
+                        "--dt",
+                        effective_ds,
+                        "--output-format",
+                        "csv",
+                        "--canonical-output",
+                        f"{mart_prefix}/part_no_canonical_name/dt={effective_ds}/",
+                    ],
+                },
+            },
+        ]
+
     master_input = build_master_input()
 
     run_master = StepFunctionStartExecutionOperator(
@@ -329,6 +441,21 @@ with DAG(
         message="{{ ti.xcom_pull(task_ids='run_retry_executions') }}",
     )
 
+    emr_steps = build_emr_steps()
+
+    add_emr_steps = EmrAddStepsOperator(
+        task_id="add_emr_steps",
+        job_flow_id=Variable.get("EMR_CLUSTER_ID"),
+        steps=emr_steps,
+    )
+
+    wait_emr = EmrStepSensor(
+        task_id="wait_emr_summary",
+        job_flow_id=Variable.get("EMR_CLUSTER_ID"),
+        step_id="{{ ti.xcom_pull(task_ids='add_emr_steps') | last }}",
+    )
+
     run_master >> wait_master >> crawl_summary
     crawl_summary >> notify_crawl
     crawl_summary >> retry_inputs >> retry_runs >> notify_retry
+    retry_runs >> add_emr_steps >> wait_emr
