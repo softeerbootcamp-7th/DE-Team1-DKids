@@ -1,7 +1,30 @@
 {
   "Comment": "Hyunki Store extraction -> map workers -> reduce CSV",
-  "StartAt": "ExtractUrls",
+  "StartAt": "CheckOverrideUrls",
   "States": {
+    "CheckOverrideUrls": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.override_urls_key",
+          "IsPresent": true,
+          "Next": "UseOverrideUrls"
+        }
+      ],
+      "Default": "ExtractUrls"
+    },
+    "UseOverrideUrls": {
+      "Type": "Pass",
+      "ResultPath": "$.extract",
+      "Parameters": {
+        "payload": {
+          "s3_bucket.$": "$.bucket",
+          "urls_key.$": "$.override_urls_key",
+          "run_id.$": "$.run_id"
+        }
+      },
+      "Next": "CheckAttempt"
+    },
     "ExtractUrls": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
@@ -22,6 +45,23 @@
         "payload.$": "$.Payload"
       },
       "ResultPath": "$.extract",
+      "Next": "CheckAttempt"
+    },
+    "CheckAttempt": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.attempt",
+          "IsPresent": true,
+          "Next": "MapUrls"
+        }
+      ],
+      "Default": "SetAttempt"
+    },
+    "SetAttempt": {
+      "Type": "Pass",
+      "Result": 1,
+      "ResultPath": "$.attempt",
       "Next": "MapUrls"
     },
     "MapUrls": {
@@ -44,6 +84,7 @@
         "batch_index.$": "$$.Map.Item.Index",
         "run_id.$": "$$.Execution.Input.run_id",
         "run_id_fallback.$": "$.extract.payload.run_id",
+        "attempt.$": "$.attempt",
         "execution_name.$": "$$.Execution.Name",
         "bucket.$": "$$.Execution.Input.bucket",
         "key_prefix.$": "$$.Execution.Input.result_prefix",
