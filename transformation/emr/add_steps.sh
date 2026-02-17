@@ -44,7 +44,7 @@ aws emr add-steps \
               \"--dt\",\"${DT}\"]
     },
     {
-      \"Name\":\"car_type_normalize\",
+      \"Name\":\"normalize_car_type\",
       \"Type\":\"CUSTOM_JAR\",
       \"ActionOnFailure\":\"CONTINUE\",
       \"Jar\":\"command-runner.jar\",
@@ -52,9 +52,9 @@ aws emr add-steps \
               \"--input\",
               \"${CLEAN_S3_PREFIX}/partsro/dt=${DT}/,${CLEAN_S3_PREFIX}/hyunki_store/dt=${DT}/,${CLEAN_S3_PREFIX}/hyunki_market/dt=${DT}/\",
               \"--format\",\"parquet\",
-              \"--output\",\"${MART_S3_PREFIX}/normalized_car_type_records/dt=${DT}/\",
+              \"--output\",\"${CLEAN_S3_PREFIX}/normalized/dt=${DT}/\",
               \"--dt\",\"${DT}\",
-              \"--output-format\",\"csv\"]
+              \"--output-format\",\"parquet\"]
     },
     {
       \"Name\":\"name_price_summary\",
@@ -62,9 +62,8 @@ aws emr add-steps \
       \"ActionOnFailure\":\"CONTINUE\",
       \"Jar\":\"command-runner.jar\",
       \"Args\":[\"spark-submit\",\"${CODE_S3_PREFIX}/build_name_price_summary.py\",
-              \"--input\",
-              \"${MART_S3_PREFIX}/normalized_car_type_records/dt=${DT}/\",
-              \"--format\",\"csv\",
+              \"--input\",\"${CLEAN_S3_PREFIX}/normalized/dt=${DT}/\",
+              \"--format\",\"parquet\",
               \"--output\",\"${MART_S3_PREFIX}/name_price_summary/dt=${DT}/\",
               \"--dt\",\"${DT}\",
               \"--output-format\",\"csv\",
