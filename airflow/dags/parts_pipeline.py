@@ -1,9 +1,11 @@
 import json
+import time
 from datetime import timedelta
 from typing import Dict, Iterable
 
 import boto3
 import pendulum
+from boto3.dynamodb.conditions import Attr, Key
 from airflow import DAG
 from airflow.decorators import task
 from airflow.models import Variable
@@ -68,6 +70,40 @@ def _count_skipped_with_reasons(s3, bucket: str, prefix: str):
             reason = "unknown"
             reasons[reason] = reasons.get(reason, 0) + 1
     return total, reasons
+
+
+def _query_failed_urls(table_name: str, source: str, ds: str, max_attempts: int) -> list[str]:
+    ddb = boto3.resource("dynamodb").Table(table_name)
+    pk = f"{source}#dt={ds}"
+    filter_expr = Attr("status").eq("FAILED") & (
+        Attr("attempt").lt(max_attempts) | Attr("attempt").not_exists()
+    )
+    items = []
+    resp = ddb.query(KeyConditionExpression=Key("pk").eq(pk), FilterExpression=filter_expr)
+    items.extend(resp.get("Items", []))
+    while "LastEvaluatedKey" in resp:
+        resp = ddb.query(
+            KeyConditionExpression=Key("pk").eq(pk),
+            FilterExpression=filter_expr,
+            ExclusiveStartKey=resp["LastEvaluatedKey"],
+        )
+        items.extend(resp.get("Items", []))
+    urls = []
+    for item in items:
+        url = item.get("url")
+        if isinstance(url, str) and url:
+            urls.append(url)
+    return urls
+
+
+def _write_retry_manifest(s3, bucket: str, key: str, urls: list[str]) -> None:
+    body = json.dumps(urls, ensure_ascii=False).encode("utf-8")
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType="application/json; charset=utf-8",
+    )
 
 
 default_args = {
@@ -161,6 +197,104 @@ with DAG(
 
         return "\n".join(lines)
 
+    @task
+    def build_retry_inputs() -> Dict[str, Dict]:
+        context = get_current_context()
+        effective_ds, effective_ds_nodash, data_end = _resolve_effective_ds(context)
+        ts_nodash = context["ts_nodash"]
+        run_id = f"{effective_ds_nodash}_{ts_nodash}"
+
+        table_name = Variable.get("DDB_TABLE", default_var="")
+        if not table_name:
+            sent_at = _now_utc_str()
+            return {
+                "_skip_reason": f"Retry skipped (ds={effective_ds}, sent_at={sent_at}): DDB disabled."
+            }
+
+        data_bucket = Variable.get("DATA_BUCKET")
+        supplier_code = Variable.get("SUPPLIER_CODE", default_var="S0000000")
+        count = int(Variable.get("CRAWL_COUNT", default_var="500"))
+        max_pages = _optional_int(Variable.get("MAX_PAGES", default_var=None))
+        max_attempts = int(Variable.get("DDB_RETRY_MAX_ATTEMPTS", default_var="2"))
+        retry_attempt = int(Variable.get("DDB_RETRY_ATTEMPT", default_var="2"))
+
+        s3 = boto3.client("s3")
+        retry_inputs: Dict[str, Dict] = {}
+
+        def make_input(source: str, urls_key: str, retry_run_id: str) -> Dict:
+            base_prefix = f"raw/{source}"
+            return {
+                "bucket": data_bucket,
+                "urls_prefix": f"{base_prefix}/urls/dt={effective_ds}",
+                "result_prefix": f"{base_prefix}/parts/dt={effective_ds}",
+                "skip_prefix": f"{base_prefix}/skipped/dt={effective_ds}",
+                "final_prefix": f"{base_prefix}/final/dt={effective_ds}",
+                "run_id": retry_run_id,
+                "list_url": None,
+                "category_urls": None,
+                "max_pages": max_pages,
+                "count": count,
+                "supplier_code": supplier_code,
+                "override_urls_key": urls_key,
+                "attempt": retry_attempt,
+            }
+
+        for source in ["partsro", "hyunki_store", "hyunki_market"]:
+            urls = _query_failed_urls(table_name, source, effective_ds, max_attempts)
+            if not urls:
+                continue
+            retry_run_id = f"{run_id}-retry{retry_attempt}"
+            key = f"raw/{source}/retry/dt={effective_ds}/run_id={retry_run_id}/urls.json"
+            _write_retry_manifest(s3, data_bucket, key, urls)
+            retry_inputs[source] = make_input(source, key, retry_run_id)
+
+        if not retry_inputs:
+            sent_at = _now_utc_str()
+            return {
+                "_skip_reason": f"Retry skipped (ds={effective_ds}, sent_at={sent_at}): no failed URLs."
+            }
+
+        return retry_inputs
+
+    @task
+    def run_retry_executions(retry_inputs: Dict[str, Dict]) -> str:
+        skip_reason = retry_inputs.pop("_skip_reason", None)
+        if skip_reason:
+            return skip_reason
+
+        sfn = boto3.client("stepfunctions")
+        arn_map = {
+            "partsro": Variable.get("PARTSRO_SFN_ARN"),
+            "hyunki_store": Variable.get("HYUNKI_STORE_SFN_ARN"),
+            "hyunki_market": Variable.get("HYUNKI_MARKET_SFN_ARN"),
+        }
+
+        lines = ["Retry summary"]
+        for source, payload in retry_inputs.items():
+            if not payload:
+                continue
+            arn = arn_map.get(source)
+            if not arn:
+                raise ValueError(f"Missing state machine ARN for {source}")
+            name = f"retry-{source}-{payload['run_id']}"[:80]
+            resp = sfn.start_execution(
+                stateMachineArn=arn,
+                name=name,
+                input=json.dumps(payload, ensure_ascii=False),
+            )
+            execution_arn = resp["executionArn"]
+            while True:
+                desc = sfn.describe_execution(executionArn=execution_arn)
+                status = desc["status"]
+                if status in ("SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"):
+                    break
+                time.sleep(15)
+            if status != "SUCCEEDED":
+                raise RuntimeError(f"Retry failed for {source}: {status}")
+            lines.append(f"- {source}: status={status}")
+
+        return "\n".join(lines)
+
     master_input = build_master_input()
 
     run_master = StepFunctionStartExecutionOperator(
@@ -176,6 +310,8 @@ with DAG(
     )
 
     crawl_summary = summarize_crawl()
+    retry_inputs = build_retry_inputs()
+    retry_runs = run_retry_executions(retry_inputs)
 
     notify_crawl = SlackWebhookOperator(
         task_id="notify_crawl_summary",
@@ -185,4 +321,14 @@ with DAG(
         message="{{ ti.xcom_pull(task_ids='summarize_crawl') }}",
     )
 
-    run_master >> wait_master >> crawl_summary >> notify_crawl
+    notify_retry = SlackWebhookOperator(
+        task_id="notify_retry_summary",
+        slack_webhook_conn_id=Variable.get(
+            "SLACK_WEBHOOK_CONN_ID", default_var="slack_webhook_default"
+        ),
+        message="{{ ti.xcom_pull(task_ids='run_retry_executions') }}",
+    )
+
+    run_master >> wait_master >> crawl_summary
+    crawl_summary >> notify_crawl
+    crawl_summary >> retry_inputs >> retry_runs >> notify_retry
