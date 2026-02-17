@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import time
 from datetime import timedelta
@@ -8,6 +10,7 @@ import pendulum
 from boto3.dynamodb.conditions import Attr, Key
 from airflow import DAG
 from airflow.decorators import task
+from airflow.hooks.base import BaseHook
 from airflow.models import Variable
 from airflow.operators.python import get_current_context
 from airflow.providers.amazon.aws.operators.emr import EmrAddStepsOperator
@@ -17,6 +20,8 @@ from airflow.providers.amazon.aws.operators.step_function import (
 from airflow.providers.amazon.aws.sensors.emr import EmrStepSensor
 from airflow.providers.amazon.aws.sensors.step_function import StepFunctionExecutionSensor
 from airflow.providers.slack.operators.slack_webhook import SlackWebhookOperator
+from airflow.utils.trigger_rule import TriggerRule
+from sqlalchemy import create_engine, text
 
 LOCAL_TZ = pendulum.timezone("UTC")
 
@@ -126,7 +131,7 @@ with DAG(
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["crawler", "emr"],
+    tags=["crawler", "emr", "rds"],
 ) as dag:
 
     @task
@@ -407,6 +412,66 @@ with DAG(
             },
         ]
 
+    @task
+    def load_to_rds() -> None:
+        context = get_current_context()
+        effective_ds, _, _ = _resolve_effective_ds(context)
+
+        data_bucket = Variable.get("DATA_BUCKET")
+        mart_prefix = _norm_s3_prefix(Variable.get("MART_S3_PREFIX"))
+        table = Variable.get("RDS_TABLE", default_var="parts_master")
+        conn_id = Variable.get("RDS_CONN_ID", default_var="rds_default")
+
+        s3 = boto3.client("s3")
+        summary_prefix = f"{mart_prefix.replace('s3://', '')}/name_price_summary/dt={effective_ds}/"
+
+        conn = BaseHook.get_connection(conn_id)
+        uri = conn.get_uri()
+        if uri.startswith("mysql://") and "mysql+pymysql://" not in uri:
+            uri = uri.replace("mysql://", "mysql+pymysql://", 1)
+        engine = create_engine(uri)
+
+        rows = []
+        bucket = summary_prefix.split("/", 1)[0]
+        prefix = summary_prefix.split("/", 1)[1]
+
+        for key in _list_keys(s3, bucket, prefix):
+            if not key.lower().endswith(".csv"):
+                continue
+            obj = s3.get_object(Bucket=bucket, Key=key)["Body"]
+            reader = csv.DictReader(io.TextIOWrapper(obj, encoding="utf-8"))
+            for row in reader:
+                rows.append(
+                    {
+                        "part_official_name": row.get("part_official_name")
+                        or row.get("name")
+                        or "",
+                        "extracted_at": row.get("extracted_at") or effective_ds,
+                        "min_price": int(row["min_price"]) if row.get("min_price") else None,
+                        "max_price": int(row["max_price"]) if row.get("max_price") else None,
+                        "car_type": row.get("car_type") or "",
+                    }
+                )
+
+        if not rows:
+            return
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(f"DELETE FROM {table} WHERE extracted_at < DATE_SUB(:dt, INTERVAL 30 DAY)"),
+                {"dt": effective_ds},
+            )
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {table}
+                    (part_official_name, extracted_at, min_price, max_price, car_type)
+                    VALUES (:part_official_name, :extracted_at, :min_price, :max_price, :car_type)
+                    """
+                ),
+                rows,
+            )
+
     master_input = build_master_input()
 
     run_master = StepFunctionStartExecutionOperator(
@@ -455,7 +520,34 @@ with DAG(
         step_id="{{ ti.xcom_pull(task_ids='add_emr_steps') | last }}",
     )
 
+    notify_transform = SlackWebhookOperator(
+        task_id="notify_transform_success",
+        slack_webhook_conn_id=Variable.get(
+            "SLACK_WEBHOOK_CONN_ID", default_var="slack_webhook_default"
+        ),
+        message="Transform done ({{ ts }}).",
+    )
+
+    notify_all_done = SlackWebhookOperator(
+        task_id="notify_pipeline_done",
+        slack_webhook_conn_id=Variable.get(
+            "SLACK_WEBHOOK_CONN_ID", default_var="slack_webhook_default"
+        ),
+        message="Pipeline done ({{ ts }}).",
+    )
+
     run_master >> wait_master >> crawl_summary
     crawl_summary >> notify_crawl
     crawl_summary >> retry_inputs >> retry_runs >> notify_retry
-    retry_runs >> add_emr_steps >> wait_emr
+    retry_runs >> add_emr_steps >> wait_emr >> notify_transform >> load_to_rds() >> notify_all_done
+
+    notify_failure = SlackWebhookOperator(
+        task_id="notify_failure",
+        slack_webhook_conn_id=Variable.get(
+            "SLACK_WEBHOOK_CONN_ID", default_var="slack_webhook_default"
+        ),
+        message="Pipeline failed ({{ ts }}). Check task logs in Airflow.",
+        trigger_rule=TriggerRule.ONE_FAILED,
+    )
+
+    [run_master, wait_master, add_emr_steps, wait_emr, load_to_rds(), retry_runs] >> notify_failure
