@@ -110,11 +110,16 @@ def main() -> None:
             F.min("price").alias("min_price"),
             F.max("price").alias("max_price"),
         )
-        .withColumnRenamed("canonical_name", "name")
-        .withColumnRenamed("car_type", "차종")
     )
 
-    summary = summary.withColumn("dt", F.lit(args.dt))
+    summary = summary.select(
+        F.col("canonical_name").alias("part_official_name"),
+        F.lit(args.dt).alias("extracted_at"),
+        F.col("min_price"),
+        F.col("max_price"),
+        F.col("car_type"),
+    )
+
     canonical = canonical.withColumn("dt", F.lit(args.dt))
 
     if args.output_format == "parquet":
@@ -122,9 +127,11 @@ def main() -> None:
         if args.canonical_output:
             canonical.write.mode("overwrite").parquet(args.canonical_output)
     else:
-        summary.write.mode("overwrite").option("header", "true").csv(args.output)
+        summary.coalesce(1).write.mode("overwrite").option("header", "true").csv(
+            args.output
+        )
         if args.canonical_output:
-            canonical.write.mode("overwrite").option("header", "true").csv(
+            canonical.coalesce(1).write.mode("overwrite").option("header", "true").csv(
                 args.canonical_output
             )
 
