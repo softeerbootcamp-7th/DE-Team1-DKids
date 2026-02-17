@@ -15,9 +15,9 @@ def read_clean(spark: SparkSession, paths: List[str], fmt: str):
 
 
 def build_canonical_map(df):
-    # For each part_no and source, pick the most frequent name in that source
+    # For each part_no + car_type + source, pick the most frequent name in that source.
     counts = (
-        df.groupBy("part_no", "source", "name")
+        df.groupBy("part_no", "car_type", "source", "name")
         .count()
         .where(F.col("name").isNotNull() & (F.length(F.col("name")) > 0))
     )
@@ -25,7 +25,7 @@ def build_canonical_map(df):
     w = (
         F.row_number()
         .over(
-            Window.partitionBy("part_no", "source")
+            Window.partitionBy("part_no", "car_type", "source")
             .orderBy(F.col("count").desc(), F.col("name").asc())
         )
     )
@@ -43,7 +43,7 @@ def build_canonical_map(df):
     w2 = (
         F.row_number()
         .over(
-            Window.partitionBy("part_no")
+            Window.partitionBy("part_no", "car_type")
             .orderBy(priority_expr.asc(), F.col("count").desc(), F.col("name").asc())
         )
     )
@@ -51,7 +51,7 @@ def build_canonical_map(df):
     canonical = (
         top_per_source.withColumn("rn", w2)
         .where(F.col("rn") == 1)
-        .select("part_no", F.col("name").alias("canonical_name"))
+        .select("part_no", "car_type", F.col("name").alias("canonical_name"))
     )
 
     return canonical
@@ -94,21 +94,24 @@ def main() -> None:
     input_paths = [p.strip() for p in args.input.split(",") if p.strip()]
 
     df = read_clean(spark, input_paths, args.format)
+    if "car_type" not in df.columns:
+        raise ValueError("Input data must include car_type (normalized value)")
 
     # price should be numeric
     df = df.withColumn("price", F.col("price").cast("int"))
 
     canonical = build_canonical_map(df)
 
-    joined = df.join(canonical, on="part_no", how="inner")
+    joined = df.join(canonical, on=["part_no", "car_type"], how="inner")
 
     summary = (
-        joined.groupBy("canonical_name")
+        joined.groupBy("canonical_name", "car_type")
         .agg(
             F.min("price").alias("min_price"),
             F.max("price").alias("max_price"),
         )
         .withColumnRenamed("canonical_name", "name")
+        .withColumnRenamed("car_type", "차종")
     )
 
     summary = summary.withColumn("dt", F.lit(args.dt))
