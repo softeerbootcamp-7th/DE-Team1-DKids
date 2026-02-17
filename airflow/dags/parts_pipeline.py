@@ -46,6 +46,12 @@ def _norm_s3_prefix(prefix: str) -> str:
     return prefix.rstrip("/") if prefix else prefix
 
 
+def _has_data_rows(s3, bucket: str, key: str, max_bytes: int = 1024 * 1024) -> bool:
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read(max_bytes)
+    lines = body.splitlines()
+    return len(lines) > 1
+
+
 def _list_keys(s3, bucket: str, prefix: str) -> Iterable[str]:
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -472,6 +478,42 @@ with DAG(
                 rows,
             )
 
+    @task
+    def cleanup_empty_mart_outputs() -> str:
+        context = get_current_context()
+        effective_ds, _, _ = _resolve_effective_ds(context)
+        sent_at = _now_utc_str()
+
+        mart_prefix = _norm_s3_prefix(Variable.get("MART_S3_PREFIX"))
+        s3 = boto3.client("s3")
+
+        summary_prefix = f"{mart_prefix.replace('s3://', '')}/name_price_summary/dt={effective_ds}/"
+        bucket = summary_prefix.split("/", 1)[0]
+        prefix = summary_prefix.split("/", 1)[1]
+
+        deleted = []
+        has_data = False
+        for key in _list_keys(s3, bucket, prefix):
+            if not key.lower().endswith(".csv"):
+                continue
+            if _has_data_rows(s3, bucket, key):
+                has_data = True
+            else:
+                s3.delete_object(Bucket=bucket, Key=key)
+                deleted.append(key)
+
+        if not has_data:
+            success_key = f"{prefix.rstrip('/')}/_SUCCESS"
+            s3.delete_object(Bucket=bucket, Key=success_key)
+
+        if not deleted and has_data:
+            return f"Empty output cleanup skipped (ds={effective_ds}, sent_at={sent_at}): data present."
+
+        return (
+            f"Empty output cleanup (ds={effective_ds}, sent_at={sent_at}): "
+            f"deleted={len(deleted)} has_data={has_data}"
+        )
+
     master_input = build_master_input()
 
     run_master = StepFunctionStartExecutionOperator(
@@ -520,6 +562,8 @@ with DAG(
         step_id="{{ ti.xcom_pull(task_ids='add_emr_steps') | last }}",
     )
 
+    cleanup_mart = cleanup_empty_mart_outputs()
+
     notify_transform = SlackWebhookOperator(
         task_id="notify_transform_success",
         slack_webhook_conn_id=Variable.get(
@@ -539,7 +583,7 @@ with DAG(
     run_master >> wait_master >> crawl_summary
     crawl_summary >> notify_crawl
     crawl_summary >> retry_inputs >> retry_runs >> notify_retry
-    retry_runs >> add_emr_steps >> wait_emr >> notify_transform >> load_to_rds() >> notify_all_done
+    retry_runs >> add_emr_steps >> wait_emr >> cleanup_mart >> notify_transform >> load_to_rds() >> notify_all_done
 
     notify_failure = SlackWebhookOperator(
         task_id="notify_failure",
