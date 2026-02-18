@@ -15,9 +15,9 @@ import boto3  # AWS SDK for S3.
 logger = logging.getLogger(__name__)  # Module-level logger.
 
 # Default S3 prefix for CSV parts.
-DEFAULT_RESULT_PREFIX = "maintenance_parts/partsro/results"
+DEFAULT_RESULT_PREFIX = "raw/partsro/parts"
 # Default S3 prefix for final CSV.
-DEFAULT_FINAL_PREFIX = "maintenance_parts/partsro/final"
+DEFAULT_FINAL_PREFIX = "raw/partsro/final"
 # Default log level.
 DEFAULT_LOG_LEVEL = "INFO"
 # Minimum size for each multipart upload part (5 MB).

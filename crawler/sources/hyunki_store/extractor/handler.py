@@ -44,7 +44,7 @@ DEFAULT_COUNT = 500
 # Default supplier code for the API.
 DEFAULT_SUPPLIER_CODE = "S0000000"
 # Default S3 prefix for URL list outputs.
-DEFAULT_KEY_PREFIX = "maintenance_parts/hyunki_store/urls"
+DEFAULT_KEY_PREFIX = "raw/hyunki_store/urls"
 # Default log level.
 DEFAULT_LOG_LEVEL = "INFO"
 
