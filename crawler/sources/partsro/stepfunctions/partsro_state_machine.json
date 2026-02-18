@@ -82,7 +82,7 @@
         "urls.$": "$$.Map.Item.Value",
         "batch_index.$": "$$.Map.Item.Index",
         "run_id.$": "$$.Execution.Input.run_id",
-        "run_id_fallback.$": "$$.Execution.Input.run_id",
+        "run_id_fallback.$": "$.extract.payload.run_id",
         "attempt.$": "$.attempt",
         "execution_name.$": "$$.Execution.Name",
         "bucket.$": "$$.Execution.Input.bucket",
