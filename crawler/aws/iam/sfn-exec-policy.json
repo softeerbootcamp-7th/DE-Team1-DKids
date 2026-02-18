@@ -23,7 +23,7 @@
       "Action": [
         "s3:GetObject"
       ],
-      "Resource": "arn:aws:s3:::maintenance-parts-source/*"
+      "Resource": "arn:aws:s3:::dkids-parts-data/*"
     },
     {
       "Effect": "Allow",
@@ -31,6 +31,17 @@
         "logs:CreateLogGroup",
         "logs:CreateLogStream",
         "logs:PutLogEvents"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:PutTargets",
+        "events:DescribeRule",
+        "events:DeleteRule",
+        "events:RemoveTargets"
       ],
       "Resource": "*"
     },
