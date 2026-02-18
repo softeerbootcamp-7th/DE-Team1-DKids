@@ -98,6 +98,25 @@ def build_api_url(
     return urlunparse((parts.scheme, parts.netloc, api_path, "", urlencode(api_q), ""))
 
 
+def replace_cate_no(list_url: str, cate_no: int) -> str:
+    """Return a list URL with cate_no replaced safely.
+
+    Args:
+        list_url: Source list URL.
+        cate_no: Target category number.
+
+    Returns:
+        URL with updated cate_no query parameter.
+    """
+    parts = urlparse(list_url)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    query["cate_no"] = [str(cate_no)]
+    query_text = urlencode(query, doseq=True)
+    return urlunparse(
+        (parts.scheme, parts.netloc, parts.path, parts.params, query_text, parts.fragment)
+    )
+
+
 def parse_api_payload(payload: str, base_url: str) -> tuple[list[str], bool]:
     """Parse API JSON payload into product detail URLs.
 
@@ -229,9 +248,8 @@ def extract_all_detail_urls(
 
     # Iterate over each category ID
     for cate_no in category_map.keys():
-
-        # Replace the cate_no in the base URL with the current category ID
-        list_url = base_list_url.replace("cate_no=177", f"cate_no={cate_no}")
+        # Update cate_no without relying on literal string replacement.
+        list_url = replace_cate_no(base_list_url, cate_no)
 
         # iter_detail_urls() is expected to iterate detail URLs from paginated list
         for url in iter_detail_urls(list_url, max_pages, count, supplier_code):

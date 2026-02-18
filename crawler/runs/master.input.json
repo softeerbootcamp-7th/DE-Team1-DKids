@@ -1,40 +1,46 @@
 {
   "partsro": {
-    "bucket": "maintenance-parts-source",
-    "urls_prefix": "maintenance_parts/partsro/urls",
-    "result_prefix": "maintenance_parts/partsro/results",
-    "skip_prefix": "maintenance_parts/partsro/skipped",
-    "final_prefix": "maintenance_parts/partsro/final",
-    "run_id": "20260212_090000",
+    "bucket": "dkids-parts-data",
+    "urls_prefix": "raw/partsro/urls",
+    "result_prefix": "raw/partsro/parts",
+    "skip_prefix": "raw/partsro/skipped",
+    "final_prefix": "raw/partsro/final",
+    "run_id": null,
     "list_url": "https://m.partsro.com/product/list_thumb.html?cate_no=177",
     "max_pages": null,
     "count": 500,
     "supplier_code": "S0000000"
+    ,
+    "attempt": 1
   },
   "hyunki_store": {
-    "bucket": "maintenance-parts-source",
-    "urls_prefix": "maintenance_parts/hyunki_store/urls",
-    "result_prefix": "maintenance_parts/hyunki_store/results",
-    "skip_prefix": "maintenance_parts/hyunki_store/skipped",
-    "final_prefix": "maintenance_parts/hyunki_store/final",
-    "run_id": "20260212_090000",
+    "bucket": "dkids-parts-data",
+    "urls_prefix": "raw/hyunki_store/urls",
+    "result_prefix": "raw/hyunki_store/parts",
+    "skip_prefix": "raw/hyunki_store/skipped",
+    "final_prefix": "raw/hyunki_store/final",
+    "run_id": null,
     "list_url": null,
     "max_pages": null,
     "count": 500,
     "category_urls": null,
     "supplier_code": "S0000000"
+    ,
+    "attempt": 1
   },
   "hyunki_market": {
-    "bucket": "maintenance-parts-source",
-    "urls_prefix": "maintenance_parts/hyunki_market/urls",
-    "result_prefix": "maintenance_parts/hyunki_market/results",
-    "skip_prefix": "maintenance_parts/hyunki_market/skipped",
-    "final_prefix": "maintenance_parts/hyunki_market/final",
-    "run_id": "20260212_090000",
+    "bucket": "dkids-parts-data",
+    "urls_prefix": "raw/hyunki_market/urls",
+    "result_prefix": "raw/hyunki_market/parts",
+    "skip_prefix": "raw/hyunki_market/skipped",
+    "final_prefix": "raw/hyunki_market/final",
+    "run_id": null,
     "list_url": null,
     "max_pages": null,
     "count": 500,
     "category_urls": null,
     "supplier_code": "S0000000"
+    ,
+    "attempt": 1
   }
 }

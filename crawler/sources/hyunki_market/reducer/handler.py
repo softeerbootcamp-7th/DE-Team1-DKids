@@ -14,8 +14,8 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RESULT_PREFIX = "maintenance_parts/hyunki_market/results"
-DEFAULT_FINAL_PREFIX = "maintenance_parts/hyunki_market/final"
+DEFAULT_RESULT_PREFIX = "raw/hyunki_market/parts"
+DEFAULT_FINAL_PREFIX = "raw/hyunki_market/final"
 DEFAULT_LOG_LEVEL = "INFO"
 MIN_PART_SIZE = 5 * 1024 * 1024
 UTF8_BOM = "\ufeff"

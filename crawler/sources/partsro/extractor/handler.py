@@ -16,7 +16,7 @@ from s3_uploader import upload_json_to_s3
 DEFAULT_LIST_URL = "https://m.partsro.com/product/list_thumb.html?cate_no=177"
 DEFAULT_SUPPLIER_CODE = "S0000000"
 DEFAULT_COUNT = 500
-DEFAULT_KEY_PREFIX = "maintenance_parts/partsro/urls"
+DEFAULT_KEY_PREFIX = "raw/partsro/urls"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_CATEGORY_MAP = {
     177: "엔진",

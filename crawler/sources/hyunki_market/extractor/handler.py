@@ -35,7 +35,7 @@ DEFAULT_CATEGORY_URLS = [
 ]
 DEFAULT_COUNT = 500
 DEFAULT_SUPPLIER_CODE = "S0000000"
-DEFAULT_KEY_PREFIX = "maintenance_parts/hyunki_market/urls"
+DEFAULT_KEY_PREFIX = "raw/hyunki_market/urls"
 DEFAULT_LOG_LEVEL = "INFO"
 
 

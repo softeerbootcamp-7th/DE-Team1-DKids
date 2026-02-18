@@ -1,13 +1,14 @@
 {
-  "bucket": "maintenance-parts-source",
-  "urls_prefix": "maintenance_parts/hyunki_market/urls",
-  "result_prefix": "maintenance_parts/hyunki_market/results",
-  "skip_prefix": "maintenance_parts/hyunki_market/skipped",
-  "final_prefix": "maintenance_parts/hyunki_market/final",
-  "run_id": "20260212_090000",
+  "bucket": "dkids-parts-data",
+  "urls_prefix": "raw/hyunki_market/urls",
+  "result_prefix": "raw/hyunki_market/parts",
+  "skip_prefix": "raw/hyunki_market/skipped",
+  "final_prefix": "raw/hyunki_market/final",
+  "run_id": null,
   "category_urls": null,
   "list_url": "https://hyunkimarket.com/category/%EC%97%94%EC%A7%84/55/",
   "max_pages": null,
   "count": 500,
-  "supplier_code": "S0000000"
+  "supplier_code": "S0000000",
+  "attempt": 1
 }

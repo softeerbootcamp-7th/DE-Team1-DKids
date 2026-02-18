@@ -15,7 +15,7 @@
       "Action": [
         "s3:ListBucket"
       ],
-      "Resource": "arn:aws:s3:::maintenance-parts-source"
+      "Resource": "arn:aws:s3:::dkids-parts-data"
     },
     {
       "Effect": "Allow",
@@ -23,9 +23,22 @@
         "s3:GetObject",
         "s3:PutObject",
         "s3:AbortMultipartUpload",
-        "s3:ListMultipartUploadParts"
+        "s3:ListMultipartUploadParts",
+        "s3:CreateMultipartUpload",
+        "s3:UploadPart",
+        "s3:CompleteMultipartUpload"
       ],
-      "Resource": "arn:aws:s3:::maintenance-parts-source/*"
+      "Resource": "arn:aws:s3:::dkids-parts-data/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-northeast-2:*:table/parts_crawl_status"
     }
   ]
 }

@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import csv  # CSV formatting for output rows.
+import hashlib  # Hashing for DynamoDB keys.
 import io  # In-memory text buffer for CSV lines.
 import json  # JSON serialization for skip records.
 import logging  # Structured logging for Lambda.
 import os  # Environment variable access.
 import re  # Regex utilities for text cleanup.
+import time  # TTL timestamps.
 from datetime import datetime  # Timestamps for extracted/skip records.
 from typing import Dict  # Type hints for parsed fields.
 
@@ -29,11 +31,14 @@ DEFAULT_UA = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 # S3 prefix for result CSV parts.
-DEFAULT_RESULT_PREFIX = "maintenance_parts/partsro/results"
+DEFAULT_RESULT_PREFIX = "raw/partsro/parts"
 # S3 prefix for skipped URL records.
-DEFAULT_SKIP_PREFIX = "maintenance_parts/partsro/skipped"
+DEFAULT_SKIP_PREFIX = "raw/partsro/skipped"
 # Default log level.
 DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_TIMEOUT_SECONDS = 20
+# DynamoDB status tracking (optional).
+DEFAULT_DDB_TTL_DAYS = 30
 # CSV columns in order.
 FIELDNAMES = [
     "extracted_at",
@@ -53,7 +58,7 @@ CATEGORY_MAP = {
     181: "트림",
 }
 # Regex to extract category from URL path.
-_CATEGORY_PATH_RE = re.compile(r"/category/(\\d+)/")
+_CATEGORY_PATH_RE = re.compile(r"/category/(\d+)/")
 
 
 def _configure_logging() -> None:
@@ -189,18 +194,16 @@ def build_csv_lines(rows: list[Dict[str, str]]) -> str:
     return buf.getvalue()  # Return CSV text.
 
 
-def _write_skip_record(
+def _write_skip_file(
     *,
     s3,
     bucket: str,
     key_prefix: str,
     run_id: str,
     part_id: str,
-    url: str,
-    status_code: int,
-    reason: str,
-) -> str:
-    """Write a JSON record for skipped URLs.
+    skipped: list[dict],
+) -> str | None:
+    """Write skipped URL records to S3.
 
     Args:
         s3: Boto3 S3 client.
@@ -208,27 +211,59 @@ def _write_skip_record(
         key_prefix: Prefix for skip records.
         run_id: Execution run id.
         part_id: Part identifier.
-        url: Skipped URL.
-        status_code: HTTP status code.
-        reason: Skip reason.
+        skipped: List of skipped URL records.
 
     Returns:
-        S3 key of the skip record.
+        S3 key of the skip record file or None when empty.
     """
+    if not skipped:
+        return None
     key = f"{key_prefix.rstrip('/')}/{run_id}/skip-{part_id}.json"  # Build key.
-    payload = {  # Build JSON payload.
-        "url": url,
-        "status_code": status_code,
-        "reason": reason,
-        "skipped_at": datetime.now().isoformat(timespec="seconds"),
-    }
     s3.put_object(  # Write JSON to S3.
         Bucket=bucket,
         Key=key,
-        Body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        Body=json.dumps(skipped, ensure_ascii=False).encode("utf-8"),
         ContentType="application/json; charset=utf-8",
     )
     return key  # Return S3 key.
+
+
+def _ddb_table():
+    """Return DynamoDB table if enabled."""
+    name = os.environ.get("DDB_TABLE")
+    if not name:
+        return None
+    return boto3.resource("dynamodb").Table(name)
+
+
+def _ddb_item(
+    *,
+    source: str,
+    url: str,
+    status: str,
+    reason: str,
+    http_status: int | None,
+    run_id: str,
+    attempt: int,
+    extracted_at: str,
+) -> dict:
+    dt = extracted_at[:10] if extracted_at else datetime.utcnow().strftime("%Y-%m-%d")
+    ttl_days = int(os.environ.get("DDB_TTL_DAYS", DEFAULT_DDB_TTL_DAYS))
+    ttl = int(time.time()) + ttl_days * 86400
+    return {
+        "pk": f"{source}#dt={dt}",
+        "sk": hashlib.sha1(url.encode("utf-8")).hexdigest(),
+        "source": source,
+        "dt": dt,
+        "run_id": run_id,
+        "url": url,
+        "status": status,
+        "reason": reason or "",
+        "http_status": http_status,
+        "attempt": attempt,
+        "updated_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "ttl": ttl,
+    }
 
 
 def handler(event, context):
@@ -302,6 +337,14 @@ def handler(event, context):
     if not extracted_at:
         extracted_at = datetime.now().isoformat(timespec="seconds")  # Default timestamp.
 
+    attempt = event.get("attempt")
+    if attempt is None and isinstance(item_ctx, dict):
+        attempt = item_ctx.get("attempt")
+    try:
+        attempt = int(attempt) if attempt is not None else 1
+    except (TypeError, ValueError):
+        attempt = 1
+
     bucket = event.get("bucket")  # Bucket from top-level event.
     if not bucket and isinstance(item_ctx, dict):
         bucket = item_ctx.get("bucket")  # Bucket from item.
@@ -323,32 +366,81 @@ def handler(event, context):
         skip_prefix = os.environ.get("SKIP_PREFIX", DEFAULT_SKIP_PREFIX)
 
     s3 = boto3.client("s3")  # S3 client.
+    ddb = _ddb_table()
+    ddb_records: list[dict] = []
 
     rows: list[Dict[str, str]] = []  # Accumulated rows.
-    skipped = 0  # Skipped URL counter.
+    skipped_records: list[dict] = []
+    timeout_seconds = int(os.environ.get("REQUEST_TIMEOUT", DEFAULT_TIMEOUT_SECONDS))
 
     # Extract detail pages.
-    for offset, detail_url in enumerate(url_list):
+    for detail_url in url_list:
         category = event.get("category") or infer_category_from_url(detail_url)  # Infer category.
         try:
-            detail_html = fetch(detail_url)  # Fetch HTML.
+            detail_html = fetch(detail_url, timeout=timeout_seconds)  # Fetch HTML.
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
             if status == 404:  # Skip missing pages.
-                skip_key = _write_skip_record(
-                    s3=s3,
-                    bucket=bucket,
-                    key_prefix=skip_prefix,
-                    run_id=run_id,
-                    part_id=f"{part_id}-{offset:03d}",
-                    url=detail_url,
-                    status_code=status,
-                    reason="not_found",
+                skipped_records.append(
+                    {
+                        "url": detail_url,
+                        "status_code": status,
+                        "reason": "not_found",
+                        "skipped_at": datetime.now().isoformat(timespec="seconds"),
+                    }
                 )
-                skipped += 1
-                logger.warning("skip 404: url=%s key=%s", detail_url, skip_key)
+                if ddb:
+                    ddb_records.append(
+                        _ddb_item(
+                            source="partsro",
+                            url=detail_url,
+                            status="FAILED",
+                            reason="not_found",
+                            http_status=status,
+                            run_id=run_id,
+                            attempt=attempt,
+                            extracted_at=extracted_at,
+                        )
+                    )
+                logger.warning("skip 404: url=%s", detail_url)
                 continue
+            if ddb:
+                ddb_records.append(
+                    _ddb_item(
+                        source="partsro",
+                        url=detail_url,
+                        status="FAILED",
+                        reason="http_error",
+                        http_status=status,
+                        run_id=run_id,
+                        attempt=attempt,
+                        extracted_at=extracted_at,
+                    )
+                )
             raise  # Re-raise other HTTP errors.
+        except requests.Timeout:
+            skipped_records.append(
+                {
+                    "url": detail_url,
+                    "status_code": None,
+                    "reason": "timeout",
+                    "skipped_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
+            if ddb:
+                ddb_records.append(
+                    _ddb_item(
+                        source="partsro",
+                        url=detail_url,
+                        status="FAILED",
+                        reason="timeout",
+                        http_status=None,
+                        run_id=run_id,
+                        attempt=attempt,
+                        extracted_at=extracted_at,
+                    )
+                )
+            continue
         detail = parse_detail(detail_html)  # Parse fields.
 
         rows.append(  # Build row dict.
@@ -362,13 +454,41 @@ def handler(event, context):
                 "applicable": detail.get("적용차(생산연도)", ""),
             }
         )
+        if ddb:
+            ddb_records.append(
+                _ddb_item(
+                    source="partsro",
+                    url=detail_url,
+                    status="SUCCESS",
+                    reason="",
+                    http_status=200,
+                    run_id=run_id,
+                    attempt=attempt,
+                    extracted_at=extracted_at,
+                )
+            )
+
+    skipped = len(skipped_records)
+    skip_key = _write_skip_file(
+        s3=s3,
+        bucket=bucket,
+        key_prefix=skip_prefix,
+        run_id=run_id,
+        part_id=part_id,
+        skipped=skipped_records,
+    )
 
     if not rows:  # If everything was skipped.
+        if ddb and ddb_records:
+            with ddb.batch_writer() as batch:
+                for item in ddb_records:
+                    batch.put_item(Item=item)
         return {
             "status": "skipped",
             "run_id": run_id,
             "s3_bucket": bucket,
             "skipped": skipped,
+            "skip_key": skip_key,
         }
 
     line = build_csv_lines(rows)  # Build CSV lines.
@@ -381,6 +501,11 @@ def handler(event, context):
         Body=line.encode("utf-8"),
         ContentType="text/csv; charset=utf-8",
     )
+
+    if ddb and ddb_records:
+        with ddb.batch_writer() as batch:
+            for item in ddb_records:
+                batch.put_item(Item=item)
 
     logger.info(
         "worker complete: run_id=%s key=%s rows=%d skipped=%d",
@@ -396,4 +521,5 @@ def handler(event, context):
         "s3_key": key,
         "rows": len(rows),
         "skipped": skipped,
+        "skip_key": skip_key,
     }

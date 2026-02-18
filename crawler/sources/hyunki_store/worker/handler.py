@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
 import io
 import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -28,12 +30,14 @@ DEFAULT_UA = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 # Default S3 prefix for result CSV parts.
-DEFAULT_RESULT_PREFIX = "maintenance_parts/hyunki_store/results"
+DEFAULT_RESULT_PREFIX = "raw/hyunki_store/parts"
 # Default S3 prefix for skipped URL records.
-DEFAULT_SKIP_PREFIX = "maintenance_parts/hyunki_store/skipped"
+DEFAULT_SKIP_PREFIX = "raw/hyunki_store/skipped"
 # Default log level.
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_TIMEOUT_SECONDS = 20
+# DynamoDB status tracking (optional).
+DEFAULT_DDB_TTL_DAYS = 30
 # CSV columns in order.
 FIELDNAMES = [
     "extracted_at",
@@ -243,6 +247,7 @@ def _resolve_context(event: dict, item_ctx: Optional[dict]) -> dict:
         "skip_prefix": pick("skip_prefix", os.environ.get("SKIP_PREFIX", DEFAULT_SKIP_PREFIX)),
         "batch_index": pick("batch_index"),
         "extracted_at": pick("extracted_at"),
+        "attempt": pick("attempt"),
         "execution_name": pick("execution_name"),
     }
 
@@ -281,6 +286,43 @@ def _write_skip_file(
     return key
 
 
+def _ddb_table():
+    name = os.environ.get("DDB_TABLE")
+    if not name:
+        return None
+    return boto3.resource("dynamodb").Table(name)
+
+
+def _ddb_item(
+    *,
+    source: str,
+    url: str,
+    status: str,
+    reason: str,
+    http_status: int | None,
+    run_id: str,
+    attempt: int,
+    extracted_at: str,
+) -> dict:
+    dt = extracted_at[:10] if extracted_at else datetime.utcnow().strftime("%Y-%m-%d")
+    ttl_days = int(os.environ.get("DDB_TTL_DAYS", DEFAULT_DDB_TTL_DAYS))
+    ttl = int(time.time()) + ttl_days * 86400
+    return {
+        "pk": f"{source}#dt={dt}",
+        "sk": hashlib.sha1(url.encode("utf-8")).hexdigest(),
+        "source": source,
+        "dt": dt,
+        "run_id": run_id,
+        "url": url,
+        "status": status,
+        "reason": reason or "",
+        "http_status": http_status,
+        "attempt": attempt,
+        "updated_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "ttl": ttl,
+    }
+
+
 def handler(event, context):
     """AWS Lambda handler to process Hyunki Store detail pages.
 
@@ -317,9 +359,16 @@ def handler(event, context):
 
     extracted_at = ctx.get("extracted_at") or datetime.now().isoformat(timespec="seconds")
     timeout_seconds = int(os.environ.get("REQUEST_TIMEOUT", DEFAULT_TIMEOUT_SECONDS))
+    attempt = ctx.get("attempt")
+    try:
+        attempt = int(attempt) if attempt is not None else 1
+    except (TypeError, ValueError):
+        attempt = 1
 
     rows: List[Dict[str, str]] = []
     skipped: List[dict] = []
+    ddb = _ddb_table()
+    ddb_records: List[dict] = []
 
     for url in url_list:
         try:
@@ -327,6 +376,19 @@ def handler(event, context):
             fields = extract_fields(html_text)
             fields["extracted_at"] = extracted_at
             rows.append(fields)
+            if ddb:
+                ddb_records.append(
+                    _ddb_item(
+                        source="hyunki_store",
+                        url=url,
+                        status="SUCCESS",
+                        reason="",
+                        http_status=200,
+                        run_id=run_id,
+                        attempt=attempt,
+                        extracted_at=extracted_at,
+                    )
+                )
         except requests.Timeout:
             skipped.append(
                 {
@@ -336,6 +398,19 @@ def handler(event, context):
                     "skipped_at": datetime.now().isoformat(timespec="seconds"),
                 }
             )
+            if ddb:
+                ddb_records.append(
+                    _ddb_item(
+                        source="hyunki_store",
+                        url=url,
+                        status="FAILED",
+                        reason="timeout",
+                        http_status=None,
+                        run_id=run_id,
+                        attempt=attempt,
+                        extracted_at=extracted_at,
+                    )
+                )
             continue
         except requests.HTTPError as exc:
             status_code = getattr(exc.response, "status_code", None)
@@ -348,7 +423,33 @@ def handler(event, context):
                         "skipped_at": datetime.now().isoformat(timespec="seconds"),
                     }
                 )
+                if ddb:
+                    ddb_records.append(
+                        _ddb_item(
+                            source="hyunki_store",
+                            url=url,
+                            status="FAILED",
+                            reason="not_found",
+                            http_status=404,
+                            run_id=run_id,
+                            attempt=attempt,
+                            extracted_at=extracted_at,
+                        )
+                    )
                 continue
+            if ddb:
+                ddb_records.append(
+                    _ddb_item(
+                        source="hyunki_store",
+                        url=url,
+                        status="FAILED",
+                        reason="http_error",
+                        http_status=status_code,
+                        run_id=run_id,
+                        attempt=attempt,
+                        extracted_at=extracted_at,
+                    )
+                )
             raise
 
     if not rows and not skipped:
@@ -364,6 +465,11 @@ def handler(event, context):
         Body=csv_body.encode("utf-8"),
         ContentType="text/csv; charset=utf-8",
     )
+
+    if ddb and ddb_records:
+        with ddb.batch_writer() as batch:
+            for item in ddb_records:
+                batch.put_item(Item=item)
 
     skip_key = _write_skip_file(
         s3=s3,
