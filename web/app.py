@@ -475,6 +475,44 @@ def norm_space(v: Any) -> str:
     return " ".join(str(v or "").split())
 
 
+def parse_llm_overrepair_verdict(diagnosis_text: str) -> Optional[bool]:
+    """
+    LLM 진단문의 첫 문장 강제 포맷을 해석합니다.
+    - True: 과잉정비
+    - False: 표준 범위
+    - None: 판독 불가
+    """
+    text = re.sub(r"^\[[^\]]+\]\s*", "", norm_space(diagnosis_text or ""))
+    if text.startswith("견적서는 다음 이유로 과잉정비입니다."):
+        return True
+    if text.startswith("견적서는 현재 근거 기준 표준 범위입니다."):
+        return False
+    return None
+
+
+def split_diagnosis_text_for_display(diagnosis_text: str) -> tuple[str, str]:
+    """
+    '[근거: ...] 본문' 형태를 (본문, 근거)로 분리합니다.
+    """
+    evidence_label_map = {
+        "hyundai_model_pdf_plus_common": "현대 정비 지침서 + 일반 정비 지침",
+        "hyundai_model_pdf_only": "현대 정비 지침서",
+        "common_only": "일반 정비 지침",
+        "no_evidence": "증거 불충분",
+    }
+    text = norm_space(diagnosis_text or "")
+    m = re.match(r"^\[(근거:\s*[^\]]+)\]\s*(.*)$", text)
+    if not m:
+        return text, ""
+    evidence_raw = m.group(1)
+    code_match = re.match(r"근거:\s*(.+)$", evidence_raw)
+    evidence_code = code_match.group(1).strip() if code_match else ""
+    evidence_kor = evidence_label_map.get(evidence_code, evidence_code)
+    evidence = evidence_kor
+    body = m.group(2).strip()
+    return body, evidence
+
+
 def norm_part(v: str) -> str:
     return re.sub(r"[\s_\-/(),.]+", "", norm_space(v).lower())
 
@@ -693,7 +731,7 @@ def run_symptom_rag_diagnosis(conn, symptom_text: str, model_code: str, quote_pa
     symptoms = split_symptoms(symptom_text)
     if not symptoms:
         return {
-            "diagnosis_text": "증상 입력이 없어 RAG 진단을 수행하지 않았습니다.",
+            "diagnosis_text": "증상 입력이 없어 증상-정비 적합성 진단을 수행하지 않았습니다.",
             "symptom_results": [],
             "llm_called": False,
         }
@@ -759,6 +797,52 @@ def run_symptom_rag_diagnosis(conn, symptom_text: str, model_code: str, quote_pa
         "possibly_unrelated_quote_parts": find_unrelated_quote_parts(quote_parts, matching_results),
         "llm_called": llm_called,
     }
+
+
+def precompute_rag_for_estimate(conn, estimate_id: str, symptom_text: str) -> str:
+    """
+    업로드 화면에서 분석 페이지 진입 전 RAG/LLM 결과를 미리 생성합니다.
+    반환값은 fallback이 반영된 최종 estimate_id입니다.
+    """
+    eid = estimate_id
+    estimate_meta_df = pd.read_sql("""
+        SELECT car_type
+        FROM test.estimates
+        WHERE id = %s
+        LIMIT 1
+    """, conn, params=(eid,))
+
+    if estimate_meta_df.empty and eid == "EST_FROM_UPLOAD" and ENV == "development":
+        eid = "EST_20260216_001"
+        estimate_meta_df = pd.read_sql("""
+            SELECT car_type
+            FROM test.estimates
+            WHERE id = %s
+            LIMIT 1
+        """, conn, params=(eid,))
+
+    car_type = estimate_meta_df.iloc[0]["car_type"] if not estimate_meta_df.empty else "차량 정보 없음"
+    parts_df = pd.read_sql("""
+        SELECT part_official_name
+        FROM test.parts
+        WHERE estimate_id = %s
+    """, conn, params=(eid,))
+    quote_parts = [norm_space(x) for x in parts_df["part_official_name"].dropna().tolist()] if not parts_df.empty else []
+    quote_parts = list(dict.fromkeys([x for x in quote_parts if x]))
+
+    symptom_text = norm_space(symptom_text)
+    if symptom_text and car_type != "차량 정보 없음":
+        cache_key = f"{eid}|{car_type}|{symptom_text}|{'|'.join(quote_parts)}"
+        if st.session_state.get("rag_result_key") != cache_key or st.session_state.get("rag_result") is None:
+            st.session_state.rag_result = run_symptom_rag_diagnosis(
+                conn, symptom_text, car_type, quote_parts
+            )
+            st.session_state.rag_result_key = cache_key
+    else:
+        st.session_state.rag_result = None
+        st.session_state.rag_result_key = ""
+
+    return eid
 
 
 # ─────────────────────────────────────────────
@@ -1060,9 +1144,22 @@ def render_upload_page() -> None:
             st.session_state.symptom_text = symptom_text.strip()
             st.session_state.rag_result = None
             st.session_state.rag_result_key = ""
-            st.session_state.estimate_id = "EST_FROM_UPLOAD"
-            st.session_state.page = "analysis"
-            st.rerun()
+            conn = get_connection()
+            if not conn:
+                st.error("데이터베이스에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.")
+            else:
+                try:
+                    with st.spinner("진단 생성 중입니다. 잠시만 기다려 주세요..."):
+                        resolved_eid = precompute_rag_for_estimate(
+                            conn, "EST_FROM_UPLOAD", st.session_state.symptom_text
+                        )
+                    st.session_state.estimate_id = resolved_eid
+                    st.session_state.page = "analysis"
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"진단 생성 중 오류가 발생했습니다: {e}")
+                finally:
+                    conn.close()
 
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1077,10 +1174,23 @@ def render_upload_page() -> None:
                 st.session_state.symptom_text = symptom_text.strip()
                 st.session_state.rag_result = None
                 st.session_state.rag_result_key = ""
-                st.session_state.estimate_id = "EST_20260216_001"
-                st.session_state.is_test_mode = True
-                st.session_state.page = "analysis"
-                st.rerun()
+                conn = get_connection()
+                if not conn:
+                    st.error("데이터베이스에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.")
+                else:
+                    try:
+                        with st.spinner("진단 생성 중입니다. 잠시만 기다려 주세요..."):
+                            resolved_eid = precompute_rag_for_estimate(
+                                conn, "EST_20260216_001", st.session_state.symptom_text
+                            )
+                        st.session_state.estimate_id = resolved_eid
+                        st.session_state.is_test_mode = True
+                        st.session_state.page = "analysis"
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"진단 생성 중 오류가 발생했습니다: {e}")
+                    finally:
+                        conn.close()
 
     st.markdown("""
     <div style="display:flex;justify-content:center;gap:24px;margin-top:32px;">
@@ -1167,6 +1277,11 @@ def render_analysis_page() -> None:
         quote_parts = [norm_space(x) for x in parts_df["part_official_name"].dropna().tolist()] if not parts_df.empty else []
         quote_parts = list(dict.fromkeys([x for x in quote_parts if x]))
         symptom_text = norm_space(st.session_state.get("symptom_text", ""))
+        rag_result: dict[str, Any] = st.session_state.get("rag_result") or {}
+        llm_overrepair = parse_llm_overrepair_verdict(rag_result.get("diagnosis_text", ""))
+        llm_issue = (llm_overrepair is True)
+        effective_issue_count = summary["issue_count"] + (1 if llm_issue else 0)
+        effective_is_over = summary["is_over"] or llm_issue
 
         st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
 
@@ -1183,18 +1298,28 @@ def render_analysis_page() -> None:
         """, unsafe_allow_html=True)
 
         # ── Verdict banner ──
-        v_cls   = "danger" if summary["is_over"] else "safe"
-        v_icon  = "⚠️"     if summary["is_over"] else "✅"
-        v_title = "과잉정비 의심" if summary["is_over"] else "적정 정비 확인"
+        v_cls   = "danger" if effective_is_over else "safe"
+        v_icon  = "⚠️"     if effective_is_over else "✅"
+        v_title = "과잉정비 의심" if effective_is_over else "적정 정비 확인"
+        summary_reason_items: list[str] = []
+        if llm_issue:
+            summary_reason_items.append("증상 무관 정비 포함")
+        if summary["p_issue"]:
+            summary_reason_items.append("부품비 과다 청구")
+        if summary["l_issue"]:
+            summary_reason_items.append("공임비 기준 초과")
+        if summary["c_issue"]:
+            summary_reason_items.append("소모품 조기 교체")
+        summary_reasons = " / ".join(summary_reason_items) if summary_reason_items else "모든 항목이 정상 범위 내에 있습니다"
         st.markdown(f"""
         <div class="verdict-banner {v_cls}">
             <div class="verdict-icon">{v_icon}</div>
             <div class="verdict-main">
                 <div class="verdict-title">{v_title}</div>
-                <div class="verdict-desc">{summary["reasons"]}</div>
+                <div class="verdict-desc">{summary_reasons}</div>
             </div>
             <div class="verdict-count">
-                <div class="verdict-num">{summary["issue_count"]}</div>
+                <div class="verdict-num">{effective_issue_count}</div>
                 <div class="verdict-num-label">이상 항목</div>
             </div>
         </div>
@@ -1205,44 +1330,49 @@ def render_analysis_page() -> None:
             cls = "chip-danger" if is_issue else "chip-success"
             return f'<div class="chip {cls}"><div class="chip-dot"></div>{label}</div>'
 
+        llm_chip_html = ""
+        if llm_overrepair is not None:
+            llm_chip_html = chip(
+                "증상 무관 정비 포함" if llm_overrepair else "증상 무관 정비 불포함",
+                llm_overrepair,
+            )
+
         st.markdown(f"""
         <div class="chips-row">
-            {chip("부품비 과다"   if summary["p_issue"] else "부품비 적정",   summary["p_issue"])}
-            {chip("공임비 초과"   if summary["l_issue"] else "공임비 적정",   summary["l_issue"])}
+            {llm_chip_html}
+            {chip("부품비 과다" if summary["p_issue"] else "부품비 적정", summary["p_issue"])}
+            {chip("공임비 초과" if summary["l_issue"] else "공임비 적정", summary["l_issue"])}
             {chip("조기 교체 의심" if summary["c_issue"] else "교체주기 적정", summary["c_issue"])}
         </div>
         """, unsafe_allow_html=True)
 
-        # ── SECTION: 증상 기반 RAG 진단 ──
+        # ── SECTION: 증상-정비 적합성 진단 ──
+        rag_badge_label = "증상 무관 정비 포함" if llm_overrepair is True else "증상 무관 정비 불포함"
+        rag_badge_cls = "badge-danger" if llm_overrepair is True else "badge-success"
+
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         rag_open = render_accordion(
             "rag", "🧠", "icon-blue",
-            "증상 기반 RAG 진단", "증상 설명 + 차종 + 견적 부품을 근거 문서와 비교합니다",
-            "LLM 진단", "badge-warning",
+            "증상-정비 적합성 진단", "증상 설명 + 차종 + 견적 부품을 근거 문서와 비교합니다",
+            rag_badge_label, rag_badge_cls,
         )
         if rag_open:
             st.markdown('<div class="acc-body">', unsafe_allow_html=True)
             if not symptom_text:
-                st.markdown('<div class="empty-msg">증상 설명이 없어 RAG 진단을 건너뜁니다</div>', unsafe_allow_html=True)
+                st.markdown('<div class="empty-msg">증상 설명이 없어 증상-정비 적합성 진단을 건너뜁니다</div>', unsafe_allow_html=True)
             elif car_type == "차량 정보 없음":
-                st.markdown('<div class="empty-msg">차량 정보가 없어 RAG 진단을 수행할 수 없습니다</div>', unsafe_allow_html=True)
+                st.markdown('<div class="empty-msg">차량 정보가 없어 증상-정비 적합성 진단을 수행할 수 없습니다</div>', unsafe_allow_html=True)
             else:
-                cache_key = f"{eid}|{car_type}|{symptom_text}|{'|'.join(quote_parts)}"
-                if st.session_state.get("rag_result_key") != cache_key or st.session_state.get("rag_result") is None:
-                    with st.spinner("증상 기반 진단 생성 중..."):
-                        st.session_state.rag_result = run_symptom_rag_diagnosis(
-                            conn, symptom_text, car_type, quote_parts
-                        )
-                        st.session_state.rag_result_key = cache_key
-                rag_result = st.session_state.get("rag_result") or {}
-                if rag_result.get("llm_called", False):
-                    st.caption("LLM 호출: 성공")
-                else:
-                    st.caption("LLM 호출: 실패 또는 미호출")
                 st.caption("입력 증상")
                 st.write(symptom_text)
                 st.caption("진단 결과")
-                st.write(rag_result.get("diagnosis_text", "진단 결과가 없습니다."))
+                diagnosis_body, diagnosis_evidence = split_diagnosis_text_for_display(
+                    rag_result.get("diagnosis_text", "진단 결과가 없습니다.")
+                )
+                st.write(diagnosis_body)
+                if diagnosis_evidence:
+                    st.caption("근거")
+                    st.write(diagnosis_evidence)
             st.markdown('</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
