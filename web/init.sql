@@ -1,8 +1,11 @@
 -- =====================================
 -- 1. Schema 생성
 -- =====================================
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 CREATE SCHEMA IF NOT EXISTS test;
-SET search_path TO test;
+SET search_path TO test, public;
 
 -- =====================================
 -- 2. Master Tables (Reference Data)
@@ -79,16 +82,35 @@ CREATE TABLE labor (
 );
 
 -- =====================================
--- 6. Sample Data Insert
+-- 6. RAG Document Chunks
+-- =====================================
+
+CREATE TABLE repair_doc_chunks (
+    id BIGSERIAL PRIMARY KEY,
+    document_source TEXT NOT NULL,
+    vehicle_model TEXT NOT NULL,
+    symptom_text TEXT NOT NULL,
+    system_category TEXT NOT NULL,
+    repair_parts TEXT NOT NULL,
+    pre_replace_check_rule TEXT NOT NULL,
+    evidence_text TEXT NOT NULL,
+    symptom_embedding VECTOR(1024),
+    UNIQUE(vehicle_model, symptom_text, repair_parts, evidence_text)
+);
+
+CREATE INDEX repair_doc_chunks_model_idx ON repair_doc_chunks(vehicle_model);
+
+-- =====================================
+-- 7. Sample Data Insert
 -- =====================================
 
 -- Master 데이터
 INSERT INTO parts_master VALUES
-('필터 에어 클리너', '제네시스', '2026-02-16', 5810, 7000),
-('서비스 키트-오일 필터', '제네시스', '2026-02-16', 6820, 8750);
+('필터 에어 클리너', '엑센트(RB)', '2026-02-16', 5810, 7000),
+('서비스 키트-오일 필터', '엑센트(RB)', '2026-02-16', 6820, 8750);
 
 INSERT INTO labor_master VALUES
-('계기판 교환', '제네시스', '2026-01-01', '9999-12-31', 0.9, 132000, 40000);
+('계기판 교환', '엑센트(RB)', '2026-01-01', '9999-12-31', 0.9, 132000, 40000);
 
 -- 고객
 INSERT INTO customer VALUES
@@ -107,14 +129,14 @@ INSERT INTO estimates (
     'EST_20260216_001',
     'test@example.com',
     's3://bucket/estimate1.png',
-    '제네시스',
+    '엑센트(RB)',
     85000,
     '2026-02-16'
 ),
 (   'EST_20260216_002',
     'test@example.com',
     's3://bucket/estimate2.png',
-    '제네시스',
+    '엑센트(RB)',
     50000,
     '2026-01-01'
 );
@@ -129,4 +151,31 @@ INSERT INTO labor VALUES
 ('EST_20260216_001', 1, '계기판 교환', 150000),
 ('EST_20260216_002', 1, '계기판 교환', 120000);
 
-
+-- RAG 근거 문서 샘플
+INSERT INTO repair_doc_chunks (
+    document_source,
+    vehicle_model,
+    symptom_text,
+    system_category,
+    repair_parts,
+    pre_replace_check_rule,
+    evidence_text
+) VALUES
+(
+    'hyundai_model_pdf',
+    '엑센트(RB)',
+    '차량이 한쪽으로 쏠린다',
+    '조향현가',
+    '드라이브샤프트(볼조인트), 휠베어링, 서스펜션/스티어링 부품',
+    '타이어 편마모·공기압 불균형 또는 휠 얼라인먼트 문제만으로 단정하지 말 것.',
+    '차량이 한쪽으로 쏠린다 . 드라이브샤프트 볼 조인트 긁힘 교 환 휠 베어링의 마모 , 소음 혹은 소착 교 환 프런트 서스펜션과 스티어링의 결함 조정 혹은 교환'
+),
+(
+    'common_guideline',
+    'common',
+    '시동 지연 및 배터리 전압 저하',
+    '전기충전',
+    '배터리, 알터네이터',
+    '배터리 성능 테스트와 충전 전압 측정 후 교체 판단',
+    '충전 전압이 기준 미달이면 발전기 계통을 먼저 점검한다.'
+);

@@ -1,7 +1,10 @@
 import os
+import re
+import json
+import requests
 import pandas as pd
 import streamlit as st
-from typing import Optional
+from typing import Optional, Any
 from dotenv import load_dotenv
 from db import get_connection
 
@@ -14,6 +17,26 @@ load_dotenv()
 # ─────────────────────────────────────────────
 ENV: str = "development"
 USER_EMAIL: str = "test@example.com"
+DEFAULT_RESPONSES_URL: str = "https://api.openai.com/v1/responses"
+
+SYSTEM_KEYWORD_RULES: dict[str, list[str]] = {
+    "엔진": ["엔진", "부조", "노킹", "진동", "소음", "터보", "부스트"],
+    "점화": ["점화", "코일", "플러그", "미스파이어", "실화"],
+    "연료": ["연료", "인젝터", "펌프", "연비", "시동지연"],
+    "냉각": ["냉각", "수온", "과열", "냉각수", "라디에이터"],
+    "배기": ["배기", "매니폴드", "촉매", "머플러", "매연"],
+    "제동": ["브레이크", "제동", "abs", "패드", "디스크"],
+    "공조": ["에어컨", "히터", "송풍", "냉방", "공조"],
+    "변속기": ["변속", "미션", "기어", "변속충격", "슬립"],
+    "전기충전": ["배터리", "충전", "알터네이터", "발전기", "전압", "크랭킹"],
+    "조향현가": ["핸들", "조향", "현가", "하체", "쇼크", "얼라인먼트", "쏠림"],
+    "시동 시스템": ["시동모터", "스타터"],
+    "바디전장": ["도어", "창문", "와이퍼", "등화", "계기판", "스마트키"],
+}
+CONSUMABLE_PART_KEYWORDS = [
+    "점화플러그", "엔진오일", "오일필터", "에어필터", "캐빈필터", "에어컨필터",
+    "브레이크패드", "브레이크라이닝", "와이퍼", "냉각수", "미션오일", "부동액",
+]
 
 
 # ─────────────────────────────────────────────
@@ -380,6 +403,10 @@ def init_session_state() -> None:
         "page": "upload",
         "estimate_id": None,
         "is_test_mode": False,
+        "symptom_text": "",
+        "rag_result": None,
+        "rag_result_key": "",
+        "acc_rag": False,
         "acc_parts": False,
         "acc_labor": False,
         "acc_cycle": False,
@@ -441,6 +468,296 @@ def get_diagnosis_summary(parts_df: pd.DataFrame, labor_df: pd.DataFrame, conn) 
         "l_issue": l_issue,
         "c_issue": c_issue,
         "reasons": " / ".join(reasons) if reasons else "모든 항목이 정상 범위 내에 있습니다",
+    }
+
+
+def norm_space(v: Any) -> str:
+    return " ".join(str(v or "").split())
+
+
+def norm_part(v: str) -> str:
+    return re.sub(r"[\s_\-/(),.]+", "", norm_space(v).lower())
+
+
+def split_parts_text(text: str) -> list[str]:
+    items = re.split(r"[,/|\n]+", text or "")
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        t = norm_space(item)
+        if not t:
+            continue
+        k = norm_part(t)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(t)
+    return out
+
+
+def split_symptoms(text: str) -> list[str]:
+    parts = [norm_space(x) for x in re.split(r"\|\||\n+", text or "")]
+    return [p for p in parts if p]
+
+
+def extract_keywords(text: str) -> list[str]:
+    tokens = re.split(r"[\s,./()\-_\[\]{}]+", norm_space(text))
+    return [t for t in tokens if len(t) >= 2]
+
+
+def infer_system_filters(symptom_text: str) -> list[str]:
+    text = norm_space(symptom_text).lower()
+    matched: list[str] = []
+    for system_name, keywords in SYSTEM_KEYWORD_RULES.items():
+        if any(keyword.lower() in text for keyword in keywords):
+            matched.append(system_name)
+    return matched
+
+
+def count_direct_matches(symptom_text: str, docs: list[dict[str, Any]]) -> int:
+    keys = extract_keywords(symptom_text)
+    if not keys:
+        return 0
+    matched = 0
+    for d in docs:
+        hay = f"{d.get('symptom_text','')} {d.get('evidence_text','')}"
+        if any(k in hay for k in keys):
+            matched += 1
+    return matched
+
+
+def retrieve_lexical(
+    conn,
+    symptom_text: str,
+    model_code: str,
+    top_k: int,
+    systems: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    where_sql = "WHERE vehicle_model = %s"
+    params: list[Any] = [norm_space(symptom_text), norm_space(symptom_text), norm_space(symptom_text), model_code]
+    if systems:
+        where_sql += " AND system_category = ANY(%s)"
+        params.append(systems)
+    params.append(top_k)
+    df = pd.read_sql(
+        f"""
+        SELECT
+            id,
+            document_source,
+            vehicle_model,
+            (
+                ts_rank_cd(
+                    to_tsvector('simple', coalesce(symptom_text, '') || ' ' || coalesce(evidence_text, '')),
+                    plainto_tsquery('simple', %s)
+                ) * 0.7
+                + GREATEST(
+                    similarity(coalesce(symptom_text, ''), %s),
+                    similarity(coalesce(evidence_text, ''), %s)
+                ) * 0.3
+            ) AS score,
+            symptom_text,
+            system_category,
+            repair_parts,
+            pre_replace_check_rule,
+            evidence_text
+        FROM test.repair_doc_chunks
+        {where_sql}
+        ORDER BY score DESC
+        LIMIT %s
+        """,
+        conn,
+        params=tuple(params),
+    )
+    return df.to_dict(orient="records") if not df.empty else []
+
+
+def part_matches_expected(quote_part: str, repair_parts: str) -> bool:
+    qk = norm_part(quote_part)
+    if not qk:
+        return False
+    expected_keys = [norm_part(p) for p in split_parts_text(repair_parts)]
+    expected_keys = [k for k in expected_keys if k]
+    return any((ek in qk) or (qk in ek) for ek in expected_keys)
+
+
+def is_consumable_part(part: str) -> bool:
+    key = norm_part(part)
+    return any(k in key for k in CONSUMABLE_PART_KEYWORDS)
+
+
+def find_unrelated_quote_parts(quote_parts: list[str], matching_results: list[dict[str, Any]]) -> list[str]:
+    if not matching_results or any(len(x.get("evidence_docs", [])) == 0 for x in matching_results):
+        return []
+    unrelated: list[str] = []
+    for qp in quote_parts:
+        if is_consumable_part(qp):
+            continue
+        matched = False
+        for sr in matching_results:
+            for d in sr.get("match_docs", []):
+                if part_matches_expected(qp, d.get("repair_parts", "")):
+                    matched = True
+                    break
+            if matched:
+                break
+        if not matched:
+            unrelated.append(qp)
+    return unrelated
+
+
+def extract_output_text(data: dict[str, Any]) -> str:
+    text = norm_space(data.get("output_text", ""))
+    if text:
+        return text
+    chunks: list[str] = []
+    for item in data.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") == "output_text":
+                chunks.append(content.get("text", ""))
+    return norm_space("".join(chunks))
+
+
+def strip_json_fence(text: str) -> str:
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.strip("`").strip()
+        if t.lower().startswith("json"):
+            t = t[4:].strip()
+    return t
+
+
+def llm_diagnose_multi(api_key: str, quote_parts: list[str], symptom_results: list[dict[str, Any]], timeout_sec: int = 60) -> dict[str, Any]:
+    system_prompt = """너는 자동차 정비 '견적서 진단/감수' 전문가다.
+역할:
+- 입력된 증상과 근거 문서를 바탕으로, 견적서의 각 정비 항목이 타당한지 점검한다.
+- 정비소를 대리하지도, 고객을 대리하지도 말고 문서 근거 중심으로 중립적으로 판단한다.
+
+작성 원칙:
+- 증상별로 근거를 분리해서 해석하고, 마지막에 견적서 관점으로 종합한다.
+- 소모품은 이번 과잉정비 판단의 핵심 대상이 아니므로, 소모품 자체의 교체 필요를 단정하지 않는다.
+- 각 증상 문구를 명시적으로 언급하고, 해당 증상과 견적 항목의 연관성을 직접 설명한다.
+- 증상과의 직접 연관 근거가 약하더라도 가능한 인과가 있으면 과잉정비로 단정하지 않는다.
+- 과잉정비 판정은 매우 보수적으로 한다. 명확한 무관 근거가 있을 때만 과잉정비로 표현한다.
+
+문체:
+- 견적서 감수 리포트처럼 간결하고 실무적으로 작성한다.
+- 불필요한 수식어를 줄이고, 어떤 항목을 왜 그렇게 판단했는지 이유를 명시한다.
+- 진단문 첫 문장에 최종 판정을 명시한다.
+  - 과잉 가능성이 높으면: "견적서는 다음 이유로 과잉정비입니다."
+  - 과잉 단정이 어려우면: "견적서는 현재 근거 기준 표준 범위입니다."
+- 증상별 설명이 빠지면 안 되며, 최소 2개 증상이 있으면 각 증상을 모두 1회 이상 직접 언급한다.
+
+출력은 JSON 객체만:
+{
+  "diagnosis_text": "짧은 1문단(2~3문장). 첫 문장은 반드시 위 두 시작문장 중 하나로 시작. 과도한 상세 항목 나열은 금지"
+}
+"""
+    symptom_blocks: list[str] = []
+    for idx, sr in enumerate(symptom_results, start=1):
+        lines = []
+        for i, d in enumerate(sr["evidence_docs"], start=1):
+            lines.append(
+                f"[{i}] source={d['document_source']} score={float(d.get('score', 0.0)):.4f} | "
+                f"system={d.get('system_category', '')} | expected={d.get('repair_parts', '')} | "
+                f"pre_check={d.get('pre_replace_check_rule', '')} | evidence={d.get('evidence_text', '')}"
+            )
+        symptom_blocks.append(
+            f"증상{idx}: {sr['symptom_text']}\n"
+            f"직접매칭수: {sr['direct_match_count_model']}\n"
+            f"근거:\n" + ("\n".join(lines) if lines else "(없음)")
+        )
+
+    payload = {
+        "model": os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+        "input": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"견적 부품: {', '.join(quote_parts) if quote_parts else '(없음)'}\n\n" + "\n\n".join(symptom_blocks)},
+        ],
+    }
+    resp = requests.post(
+        DEFAULT_RESPONSES_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout_sec,
+    )
+    if not resp.ok:
+        raise RuntimeError(f"LLM API 호출 실패(status={resp.status_code})")
+    txt = extract_output_text(resp.json())
+    parsed = json.loads(strip_json_fence(txt))
+    if not isinstance(parsed, dict):
+        raise RuntimeError("LLM 응답 JSON 객체 파싱 실패")
+    return parsed
+
+
+def run_symptom_rag_diagnosis(conn, symptom_text: str, model_code: str, quote_parts: list[str]) -> dict[str, Any]:
+    symptoms = split_symptoms(symptom_text)
+    if not symptoms:
+        return {
+            "diagnosis_text": "증상 입력이 없어 RAG 진단을 수행하지 않았습니다.",
+            "symptom_results": [],
+            "llm_called": False,
+        }
+
+    symptom_results: list[dict[str, Any]] = []
+    matching_results: list[dict[str, Any]] = []
+    total_model_docs = 0
+    total_common_docs = 0
+    for symptom in symptoms:
+        inferred_systems = infer_system_filters(symptom)
+        model_docs = retrieve_lexical(conn, symptom, model_code, top_k=8, systems=inferred_systems or None)
+        direct_match_count = count_direct_matches(symptom, model_docs)
+        common_docs: list[dict[str, Any]] = []
+        if len(model_docs) < 3 or direct_match_count < 1:
+            common_docs = retrieve_lexical(conn, symptom, "common", top_k=5, systems=inferred_systems or None)
+
+        total_model_docs += len(model_docs)
+        total_common_docs += len(common_docs)
+
+        merged_docs = model_docs + common_docs
+        merged_docs.sort(key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+        filtered_docs = [d for d in merged_docs if float(d.get("score", 0.0) or 0.0) >= 0.02]
+        matching_results.append(
+            {
+                "symptom_text": symptom,
+                "match_docs": merged_docs,
+                "evidence_docs": filtered_docs[:3],
+            }
+        )
+        symptom_results.append(
+            {
+                "symptom_text": symptom,
+                "direct_match_count_model": direct_match_count,
+                "evidence_docs": filtered_docs[:3],
+            }
+        )
+
+    evidence_scope = "hyundai_model_pdf_plus_common" if total_model_docs > 0 and total_common_docs > 0 else (
+        "hyundai_model_pdf_only" if total_model_docs > 0 else ("common_only" if total_common_docs > 0 else "no_evidence")
+    )
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return {
+            "diagnosis_text": f"[근거: {evidence_scope}] OPENAI_API_KEY가 없어 LLM 최종 진단을 생략했습니다.",
+            "evidence_scope": evidence_scope,
+            "symptom_results": symptom_results,
+            "possibly_unrelated_quote_parts": find_unrelated_quote_parts(quote_parts, matching_results),
+            "llm_called": False,
+        }
+    try:
+        verdict = llm_diagnose_multi(api_key, quote_parts, symptom_results, timeout_sec=60)
+        diagnosis_text = norm_space(verdict.get("diagnosis_text", ""))
+        if not diagnosis_text:
+            diagnosis_text = "견적서는 현재 근거 기준 표준 범위입니다."
+        llm_called = True
+    except Exception:
+        diagnosis_text = "LLM 호출에 실패해 근거 기반 임시 진단만 제공합니다."
+        llm_called = False
+    return {
+        "diagnosis_text": f"[근거: {evidence_scope}] {diagnosis_text}",
+        "evidence_scope": evidence_scope,
+        "symptom_results": symptom_results,
+        "possibly_unrelated_quote_parts": find_unrelated_quote_parts(quote_parts, matching_results),
+        "llm_called": llm_called,
     }
 
 
@@ -727,12 +1044,22 @@ def render_upload_page() -> None:
             label_visibility="collapsed",
         )
 
+        symptom_text = st.text_area(
+            "증상 설명",
+            value=st.session_state.get("symptom_text", ""),
+            placeholder="예: 차량이 한쪽으로 쏠린다\n예: 제동 시 소음이 발생한다",
+            height=110,
+        )
+
         if st.button(
             "진단 시작하기 →",
             use_container_width=True,
             type="primary",
             disabled=(uploaded is None),
         ):
+            st.session_state.symptom_text = symptom_text.strip()
+            st.session_state.rag_result = None
+            st.session_state.rag_result_key = ""
             st.session_state.estimate_id = "EST_FROM_UPLOAD"
             st.session_state.page = "analysis"
             st.rerun()
@@ -747,6 +1074,9 @@ def render_upload_page() -> None:
             </div>
             """, unsafe_allow_html=True)
             if st.button("샘플 데이터로 체험하기", use_container_width=True):
+                st.session_state.symptom_text = symptom_text.strip()
+                st.session_state.rag_result = None
+                st.session_state.rag_result_key = ""
                 st.session_state.estimate_id = "EST_20260216_001"
                 st.session_state.is_test_mode = True
                 st.session_state.page = "analysis"
@@ -771,6 +1101,24 @@ def render_analysis_page() -> None:
 
     try:
         eid = st.session_state.estimate_id
+
+        estimate_meta_df = pd.read_sql("""
+            SELECT car_type, service_finish_at
+            FROM test.estimates
+            WHERE id = %s
+            LIMIT 1
+        """, conn, params=(eid,))
+
+        if estimate_meta_df.empty and eid == "EST_FROM_UPLOAD" and ENV == "development":
+            st.info("업로드 견적 파싱이 아직 연결되지 않아 샘플 견적으로 진단을 표시합니다.")
+            eid = "EST_20260216_001"
+            st.session_state.estimate_id = eid
+            estimate_meta_df = pd.read_sql("""
+                SELECT car_type, service_finish_at
+                FROM test.estimates
+                WHERE id = %s
+                LIMIT 1
+            """, conn, params=(eid,))
 
         parts_df = pd.read_sql("""
             SELECT
@@ -811,12 +1159,18 @@ def render_analysis_page() -> None:
         """, conn, params=(eid,))
 
         summary = get_diagnosis_summary(parts_df, labor_df, conn)
+        car_type = estimate_meta_df.iloc[0]["car_type"] if not estimate_meta_df.empty else "차량 정보 없음"
+        svc_date = (
+            str(estimate_meta_df.iloc[0]["service_finish_at"])[:10]
+            if not estimate_meta_df.empty else ""
+        )
+        quote_parts = [norm_space(x) for x in parts_df["part_official_name"].dropna().tolist()] if not parts_df.empty else []
+        quote_parts = list(dict.fromkeys([x for x in quote_parts if x]))
+        symptom_text = norm_space(st.session_state.get("symptom_text", ""))
 
         st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
 
         # ── Estimate meta strip ──
-        car_type = labor_df.iloc[0]["car_type"]      if not labor_df.empty else "차량 정보 없음"
-        svc_date = str(labor_df.iloc[0]["service_finish_at"])[:10] if not labor_df.empty else ""
         st.markdown(f"""
         <div class="meta-strip">
             <div>
@@ -858,6 +1212,39 @@ def render_analysis_page() -> None:
             {chip("조기 교체 의심" if summary["c_issue"] else "교체주기 적정", summary["c_issue"])}
         </div>
         """, unsafe_allow_html=True)
+
+        # ── SECTION: 증상 기반 RAG 진단 ──
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        rag_open = render_accordion(
+            "rag", "🧠", "icon-blue",
+            "증상 기반 RAG 진단", "증상 설명 + 차종 + 견적 부품을 근거 문서와 비교합니다",
+            "LLM 진단", "badge-warning",
+        )
+        if rag_open:
+            st.markdown('<div class="acc-body">', unsafe_allow_html=True)
+            if not symptom_text:
+                st.markdown('<div class="empty-msg">증상 설명이 없어 RAG 진단을 건너뜁니다</div>', unsafe_allow_html=True)
+            elif car_type == "차량 정보 없음":
+                st.markdown('<div class="empty-msg">차량 정보가 없어 RAG 진단을 수행할 수 없습니다</div>', unsafe_allow_html=True)
+            else:
+                cache_key = f"{eid}|{car_type}|{symptom_text}|{'|'.join(quote_parts)}"
+                if st.session_state.get("rag_result_key") != cache_key or st.session_state.get("rag_result") is None:
+                    with st.spinner("증상 기반 진단 생성 중..."):
+                        st.session_state.rag_result = run_symptom_rag_diagnosis(
+                            conn, symptom_text, car_type, quote_parts
+                        )
+                        st.session_state.rag_result_key = cache_key
+                rag_result = st.session_state.get("rag_result") or {}
+                if rag_result.get("llm_called", False):
+                    st.caption("LLM 호출: 성공")
+                else:
+                    st.caption("LLM 호출: 실패 또는 미호출")
+                st.caption("입력 증상")
+                st.write(symptom_text)
+                st.caption("진단 결과")
+                st.write(rag_result.get("diagnosis_text", "진단 결과가 없습니다."))
+            st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
         # ── SECTION 1: 부품비 ──
         over_cnt    = sum(
@@ -944,6 +1331,10 @@ def render_analysis_page() -> None:
                 "page": "upload",
                 "estimate_id": None,
                 "is_test_mode": False,
+                "symptom_text": "",
+                "rag_result": None,
+                "rag_result_key": "",
+                "acc_rag": False,
                 "acc_parts": False,
                 "acc_labor": False,
                 "acc_cycle": False,
