@@ -1,5 +1,2 @@
-ai_settings:
-  model_name: "gemini-2.0-flash"
-
 # Environment Setting: development / production
 environment: "development"

@@ -1,8 +1,6 @@
-version: "3.8"
-
 services:
   db:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     container_name: postgres
     # Standard postgres env vars are also managed via .env
     env_file:
