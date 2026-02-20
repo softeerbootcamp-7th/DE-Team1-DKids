@@ -1,13 +1,14 @@
 import pandas as pd
 import streamlit as st
 from typing import Any
-
+from datetime import datetime
 from config import ENV
 from db import get_connection
 from logic import (
     norm_space, parse_llm_overrepair_verdict, split_diagnosis_text_for_display,
     get_diagnosis_summary, build_cycle_issues, get_prev_mileage,
     precompute_rag_for_estimate,
+    extract_estimate_from_image, insert_estimate,
 )
 from components import (
     render_topbar, render_part_bar, render_labor_card,
@@ -74,6 +75,10 @@ def render_upload_page() -> None:
         """, unsafe_allow_html=True)
 
         uploaded     = st.file_uploader("견적서", type=["jpg", "jpeg", "png"], label_visibility="collapsed")
+        estimate_id_input = st.text_input(
+            "견적서 ID (선택 입력)",
+            placeholder="예: 2026-02-16-A001"
+        )
         symptom_text = st.text_area(
             "증상",
             value=st.session_state.get("symptom_text", ""),
@@ -82,8 +87,44 @@ def render_upload_page() -> None:
         )
 
         if st.button("진단 시작", use_container_width=True, type="primary", disabled=(uploaded is None)):
-            _start_diagnosis(symptom_text, "EST_FROM_UPLOAD")
 
+            if uploaded is None:
+                st.warning("이미지를 업로드하세요.")
+                return
+
+            conn = get_connection()
+            if not conn:
+                st.error("데이터베이스에 연결할 수 없습니다.")
+                return
+
+            try:
+                with st.spinner("OCR 분석 및 저장 중..."):
+
+                    image_bytes = uploaded.read()
+
+                    # 1️⃣ OCR 수행
+                    estimate_data = extract_estimate_from_image(image_bytes)
+
+                    # 2️⃣ 견적서 ID 결정
+                    if estimate_id_input.strip():
+                        new_estimate_id = estimate_id_input.strip()
+                    else:
+                        new_estimate_id = "EST_" + datetime.now().strftime("%Y%m%d%H%M%S")
+
+                    # 3️⃣ DB 저장
+                    insert_estimate(conn, new_estimate_id, estimate_data)
+
+                st.success("견적서 저장 완료")
+
+                # 4️⃣ 기존 분석 흐름 유지
+                _start_diagnosis(symptom_text, new_estimate_id)
+
+            except Exception as e:
+                conn.rollback()
+                st.error(f"OCR 또는 저장 중 오류 발생: {e}")
+            finally:
+                conn.close()
+                
         st.markdown('</div>', unsafe_allow_html=True)
 
         if ENV == "development":
@@ -218,8 +259,7 @@ def _load_estimate_data(conn, eid: str):
             FROM   test.parts_master pm
             WHERE  pm.part_official_name = p.part_official_name
               AND  pm.car_type           = e.car_type
-            ORDER  BY pm.extracted_at DESC
-            LIMIT  1
+              AND  pm.extracted_at       = e.service_finish_at
         ) pm ON TRUE
         WHERE p.estimate_id = %s
     """, conn, params=(eid,))

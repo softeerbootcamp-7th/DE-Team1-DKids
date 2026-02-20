@@ -205,14 +205,29 @@ def get_diagnosis_summary(
     parts_df: pd.DataFrame, labor_df: pd.DataFrame,
     conn, estimate_id: str,
 ) -> dict:
-    p_issue = (
-        any(parts_df["unit_price"] > parts_df["max_price"])
-        if not parts_df.empty and "max_price" in parts_df.columns else False
-    )
-    l_issue = (
-        any(labor_df["tech_fee"] > (labor_df["standard_repair_time"] * labor_df["hour_labor_rate"]))
-        if not labor_df.empty else False
-    )
+    p_issue = False
+    if not parts_df.empty and "max_price" in parts_df.columns:
+        valid_parts = parts_df[
+            parts_df["unit_price"].notna() &
+            parts_df["max_price"].notna()
+        ]
+        if not valid_parts.empty:
+            p_issue = any(valid_parts["unit_price"] > valid_parts["max_price"])
+    
+    l_issue = False
+    if not labor_df.empty:
+        valid_labor = labor_df[
+            labor_df["tech_fee"].notna() &
+            labor_df["standard_repair_time"].notna() &
+            labor_df["hour_labor_rate"].notna()
+        ]
+        if not valid_labor.empty:
+            l_issue = any(
+                valid_labor["tech_fee"] >
+                valid_labor["standard_repair_time"] *
+                valid_labor["hour_labor_rate"]
+            )
+            
     c_issue = False
     if not labor_df.empty:
         curr_m = labor_df.iloc[0]["car_mileage"]
@@ -416,3 +431,154 @@ def precompute_rag_for_estimate(conn, estimate_id: str, symptom_text: str) -> st
         st.session_state.rag_result     = None
         st.session_state.rag_result_key = ""
     return eid
+    
+# 기존 import 그대로 유지
+import re
+import json
+import requests
+import pandas as pd
+import streamlit as st
+from typing import Optional, Any
+from config import (
+    ENV, USER_EMAIL, DEFAULT_GEMINI_URL,
+    SYSTEM_KEYWORD_RULES, CONSUMABLE_PART_KEYWORDS,
+)
+import os
+from datetime import datetime
+import base64
+
+
+# -----------------------------
+# (기존 logic.py 내용 전부 동일)
+# -----------------------------
+# ⚠️ 기존 코드들은 그대로 두면 된다.
+# 여기서는 추가된 함수들만 아래에 붙인다.
+# -----------------------------
+
+
+# =========================================================
+# OCR → JSON 구조화
+# =========================================================
+
+def extract_estimate_from_image(image_bytes: bytes) -> dict:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY 없음")
+
+    b64 = base64.b64encode(image_bytes).decode()
+
+    prompt = """
+    자동차 정비 견적서를 분석하여 JSON으로 반환하라.
+
+    {
+        "car_type": "...",
+        "car_mileage": 120000,
+        "service_finish_at": "YYYY-MM-DD",
+        "parts": [
+            {"name": "...", "unit_price": 100000}
+        ],
+        "labor": [
+            {"repair_content": "...", "tech_fee": 80000}
+        ]
+    }
+
+    JSON만 출력.
+    """
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {
+                    "inlineData": {
+                        "mimeType": "image/png",
+                        "data": b64
+                    }
+                }
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json"
+        }
+    }
+
+    resp = requests.post(
+        f"{DEFAULT_GEMINI_URL}?key={api_key}",
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        timeout=60
+    )
+
+    if not resp.ok:
+        raise RuntimeError(resp.text)
+
+    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    parsed = json.loads(text.strip("` \n"))
+
+    if isinstance(parsed, list):
+        if len(parsed) > 0 and isinstance(parsed[0], dict):
+            parsed = parsed[0]
+        else:
+            raise RuntimeError("OCR 결과 형식이 올바르지 않습니다.")
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError("OCR 결과가 JSON 객체가 아닙니다.")
+
+    return parsed
+
+
+# =========================================================
+# DB INSERT
+# =========================================================
+
+def insert_estimate(conn, estimate_id: str, data: dict):
+    cur = conn.cursor()
+
+    # 중복 체크
+    cur.execute("SELECT 1 FROM test.estimates WHERE id = %s", (estimate_id,))
+    if cur.fetchone():
+        raise RuntimeError("이미 존재하는 견적서 ID입니다.")
+
+    # estimates
+    cur.execute("""
+        INSERT INTO test.estimates
+        (id, customer_id, image_url, car_type, car_mileage, service_finish_at, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (
+        estimate_id,
+        USER_EMAIL,
+        None,
+        data.get("car_type"),
+        int(data.get("car_mileage", 0)),
+        data.get("service_finish_at"),
+        datetime.now()
+    ))
+
+    # parts
+    for idx, p in enumerate(data.get("parts", []), start=1):
+        cur.execute("""
+            INSERT INTO test.parts
+            (estimate_id, no, part_official_name, unit_price)
+            VALUES (%s, %s, %s, %s)
+        """, (
+            estimate_id,
+            idx,
+            p.get("name"),
+            int(str(p.get("unit_price", 0)).replace(",", ""))
+        ))
+
+    # labor
+    for idx, l in enumerate(data.get("labor", []), start=1):
+        cur.execute("""
+            INSERT INTO test.labor
+            (estimate_id, no, repair_content, tech_fee)
+            VALUES (%s, %s, %s, %s)
+        """, (
+            estimate_id,
+            idx,
+            l.get("repair_content"),
+            int(str(l.get("tech_fee", 0)).replace(",", ""))
+        ))
+
+    conn.commit()
