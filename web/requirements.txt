@@ -6,3 +6,4 @@ google-generativeai>=0.3.0
 plotly>=5.18.0
 PyYAML>=6.0.0
 python-dotenv>=1.0.0
+reportlab>=4.0.0

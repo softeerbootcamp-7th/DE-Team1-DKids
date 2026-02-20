@@ -8,6 +8,7 @@ import streamlit as st
 from typing import Optional, Any
 from dotenv import load_dotenv
 from db import get_connection
+from pdf_report import generate_diagnosis_pdf  # ← 추가
 
 load_dotenv()
 
@@ -105,7 +106,6 @@ def inject_global_css() -> None:
 
     .page-wrap { padding: 28px 0 72px; }
 
-    /* 판정 배너 */
     .top-verdict {
         border-radius: 16px; padding: 24px 26px; margin-bottom: 14px;
         border: 2px solid; display: flex; align-items: center; gap: 18px;
@@ -127,7 +127,6 @@ def inject_global_css() -> None:
     .top-verdict.safe   .top-verdict-num { color: var(--success); }
     .top-verdict-num-label { font-size: 11px; color: var(--gray-500); margin-top: 3px; font-weight: 600; }
 
-    /* 이슈 카드 */
     .issue-card {
         background: #fff; border: 1.5px solid var(--danger-border);
         border-radius: 12px; padding: 15px 18px; margin-bottom: 9px;
@@ -137,7 +136,6 @@ def inject_global_css() -> None:
     .issue-card-title  { font-size: 14px; font-weight: 700; color: var(--danger); }
     .issue-card-body   { font-size: 13px; color: var(--gray-700); line-height: 1.7; }
 
-    /* chips */
     .chips-row { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 16px; margin-top: 6px; }
     .chip {
         display: inline-flex; align-items: center; gap: 6px;
@@ -150,7 +148,6 @@ def inject_global_css() -> None:
     .chip-success { background: var(--success-light); border-color: var(--success-border); color: #166534; }
     .chip-success .chip-dot { background: var(--success); }
 
-    /* 섹션 카드 / 아코디언 */
     .section-card {
         background: #fff; border: 1px solid var(--gray-200);
         border-radius: 12px; margin-bottom: 10px; overflow: hidden;
@@ -196,7 +193,6 @@ def inject_global_css() -> None:
         to   { opacity: 1; transform: translateY(0); }
     }
 
-    /* part bar */
     .part-item { padding: 14px 0; border-bottom: 1px solid var(--gray-100); }
     .part-item:last-child { border-bottom: none; }
     .part-row-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
@@ -226,7 +222,6 @@ def inject_global_css() -> None:
         font-size: 10px; color: var(--gray-400); white-space: nowrap;
     }
 
-    /* labor */
     .labor-item {
         display: flex; align-items: stretch; gap: 13px;
         padding: 13px 0; border-bottom: 1px solid var(--gray-100);
@@ -242,7 +237,6 @@ def inject_global_css() -> None:
     .labor-standard-text{ font-size: 11px; color: var(--gray-400); }
     .labor-nodata       { padding: 8px 0; font-size: 12px; color: var(--gray-400); font-style: italic; }
 
-    /* cycle */
     .cycle-item { padding: 13px 0; border-bottom: 1px solid var(--gray-100); }
     .cycle-item:last-child { border-bottom: none; }
     .cycle-row-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
@@ -254,6 +248,22 @@ def inject_global_css() -> None:
 
     .empty-msg { font-size: 12px; color: var(--gray-400); padding: 12px 0; text-align: center; font-style: italic; }
     .stButton > button { font-family: 'Pretendard', sans-serif !important; font-weight: 600 !important; }
+
+    /* ── 상단 미니 PDF 저장 바 ── */
+    .mini-pdf-bar {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-bottom: 10px;
+    }
+    .mini-pdf-label {
+        font-size: 11px;
+        color: var(--gray-400);
+        font-weight: 500;
+    }
+
+
     </style>
     """, unsafe_allow_html=True)
 
@@ -324,6 +334,39 @@ def get_diagnosis_summary(parts_df: pd.DataFrame, labor_df: pd.DataFrame, conn) 
         "l_issue": l_issue,
         "c_issue": c_issue,
     }
+
+
+def build_cycle_issues(labor_df: pd.DataFrame, conn, eid: str) -> list[dict]:
+    issues = []
+    if labor_df.empty:
+        return issues
+    curr_m = int(labor_df.iloc[0]["car_mileage"])
+    for _, row in labor_df.iterrows():
+        cyc = row.get("change_cycle")
+        if cyc is None or (isinstance(cyc, float) and pd.isna(cyc)):
+            continue
+        cyc = int(cyc)
+        prev_m = get_prev_mileage(conn, row["repair_content"], eid)
+        usage  = (curr_m - prev_m) if prev_m is not None else None
+
+        if usage is None:
+            verdict = "첫 교체"
+        elif usage >= cyc:
+            verdict = "교체 적절"
+        elif usage >= cyc * 0.8:
+            verdict = "권장 시기"
+        else:
+            verdict = "조기 교체"
+
+        issues.append({
+            "repair_content":  row["repair_content"],
+            "current_mileage": curr_m,
+            "prev_mileage":    prev_m,
+            "usage":           usage if usage is not None else 0,
+            "cycle":           cyc,
+            "verdict":         verdict,
+        })
+    return issues
 
 
 def norm_space(v: Any) -> str:
@@ -397,7 +440,6 @@ def count_direct_matches(symptom_text: str, docs: list[dict[str, Any]]) -> int:
 
 
 def retrieve_lexical(conn, symptom_text: str, model_code: str, top_k: int, systems: list[str] | None = None) -> list[dict[str, Any]]:
-    # ── 수정: test.repair_doc_chunks → repair_doc_chunks (SET search_path TO test 의존) ──
     where_sql = "WHERE vehicle_model = %s"
     params: list[Any] = [norm_space(symptom_text), norm_space(symptom_text), norm_space(symptom_text), model_code]
     if systems:
@@ -807,6 +849,80 @@ def render_accordion(section_id: str, icon: str, icon_cls: str,
 
 
 # ─────────────────────────────────────────────
+# PDF 생성 공통 헬퍼 (상단·하단 버튼 공유)
+# ─────────────────────────────────────────────
+
+def _get_pdf_bytes(
+    parts_df: pd.DataFrame,
+    labor_df: pd.DataFrame,
+    summary: dict,
+    rag_result: dict,
+    symptom_text: str,
+    car_type: str,
+    svc_date: str,
+    estimate_id: str,
+    cycle_issues: list[dict],
+) -> bytes:
+    """PDF 바이트를 생성 (캐시 적용)."""
+    @st.cache_data(show_spinner=False)
+    def _cached(eid: str, sym: str) -> bytes:
+        return generate_diagnosis_pdf(
+            parts_df=parts_df,
+            labor_df=labor_df,
+            summary=summary,
+            rag_result=rag_result,
+            symptom_text=symptom_text,
+            car_type=car_type,
+            svc_date=svc_date,
+            estimate_id=eid,
+            cycle_issues=cycle_issues,
+        )
+    return _cached(estimate_id, symptom_text)
+
+
+# ─────────────────────────────────────────────
+# 상단 미니 PDF 저장 바  ← 신규
+# ─────────────────────────────────────────────
+
+def render_mini_pdf_button(
+    parts_df: pd.DataFrame,
+    labor_df: pd.DataFrame,
+    summary: dict,
+    rag_result: dict,
+    symptom_text: str,
+    car_type: str,
+    svc_date: str,
+    estimate_id: str,
+    cycle_issues: list[dict],
+) -> None:
+    """판정 배너 바로 위에 붙는 작은 PDF 저장 버튼 (우측 정렬)."""
+    from datetime import datetime as _dt
+
+    try:
+        pdf_bytes = _get_pdf_bytes(
+            parts_df, labor_df, summary, rag_result,
+            symptom_text, car_type, svc_date, estimate_id, cycle_issues,
+        )
+        filename = f"CarCheck_{estimate_id}_{_dt.now().strftime('%Y%m%d')}.pdf"
+
+        _, col_btn = st.columns([6, 2])
+        with col_btn:
+            st.download_button(
+                label="📄 진단 보고서 저장",
+                data=pdf_bytes,
+                file_name=filename,
+                mime="application/pdf",
+                use_container_width=True,
+                key="pdf_mini_top",
+            )
+    except Exception:
+        pass
+
+
+
+
+
+# ─────────────────────────────────────────────
 # 5. PAGES
 # ─────────────────────────────────────────────
 
@@ -829,19 +945,24 @@ def render_upload_page() -> None:
         border: 1px solid rgba(255,255,255,0.3) !important;
         color: white !important; border-radius: 8px !important;
     }
-    /* 수정 1: 텍스트 영역 글자 흰색 */
-    /* 텍스트 영역 스타일 수정 */
+    .stTextArea label,
+    .stTextArea label p,
+    div[data-testid="stTextArea"] label,
+    div[data-testid="stTextArea"] label p {
+        color: #ffffff !important;
+        font-size: 14px !important;
+        font-weight: 700 !important;
+        opacity: 1 !important;
+    }
     .stTextArea textarea {
-        background: #ffffff !important;   /* 배경 흰색 */
+        background: #ffffff !important;
         border: 1px solid rgba(0,0,0,0.15) !important;
-        color: #000000 !important;        /* ✅ 실제 입력 텍스트 검은색 */
+        color: #000000 !important;
         border-radius: 8px !important;
         caret-color: #000000 !important;
     }
-
-    /* ✅ placeholder만 회색 */
     .stTextArea textarea::placeholder {
-        color: #9ca3af !important;   /* 연회색 */
+        color: #9ca3af !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -972,8 +1093,7 @@ def render_analysis_page() -> None:
             ) pm ON TRUE
             WHERE p.estimate_id = %s
             """,
-            conn,
-            params=(eid,),
+            conn, params=(eid,),
         )
 
         labor_df = pd.read_sql(
@@ -995,8 +1115,7 @@ def render_analysis_page() -> None:
                 AND e.service_finish_at BETWEEN lm.start_date AND lm.end_date
             WHERE l.estimate_id = %s
             """,
-            conn,
-            params=(eid,),
+            conn, params=(eid,),
         )
 
         summary       = get_diagnosis_summary(parts_df, labor_df, conn)
@@ -1009,11 +1128,25 @@ def render_analysis_page() -> None:
         effective_issue_count = summary["issue_count"] + (1 if llm_issue else 0)
         effective_is_over     = summary["is_over"] or llm_issue
 
+        cycle_issues = build_cycle_issues(labor_df, conn, eid)
+
         st.markdown('<div class="page-wrap">', unsafe_allow_html=True)
+
+        # ── ★ 상단 미니 PDF 저장 버튼 (판정 배너 바로 위) ──
+        render_mini_pdf_button(
+            parts_df=parts_df,
+            labor_df=labor_df,
+            summary=summary,
+            rag_result=rag_result,
+            symptom_text=symptom_text,
+            car_type=car_type,
+            svc_date=svc_date,
+            estimate_id=eid,
+            cycle_issues=cycle_issues,
+        )
 
         # ── 판정 배너 ──
         v_cls  = "danger" if effective_is_over else "safe"
-        
         v_title = "과잉정비 의심" if effective_is_over else "이상 없음"
         v_sub   = "아래 항목에서 이상이 감지되었습니다." if effective_is_over else "부품비·공임비·교체주기 모두 정상입니다."
 
@@ -1084,7 +1217,7 @@ def render_analysis_page() -> None:
                 </div>
                 """, unsafe_allow_html=True)
 
-        # ── 수정 3: chips (HTML 렌더링 문제 수정 — f-string 직접 삽입 방식 유지하되 chips-row를 단일 markdown으로) ──
+        # ── chips ──
         def make_chip(label: str, is_issue: bool) -> str:
             cls = "chip-danger" if is_issue else "chip-success"
             return f'<div class="chip {cls}"><div class="chip-dot"></div>{label}</div>'
@@ -1172,6 +1305,7 @@ def render_analysis_page() -> None:
         st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown('<div style="height:12px;"></div>', unsafe_allow_html=True)
+
         if st.button("처음으로"):
             st.session_state.update({
                 "page": "upload", "estimate_id": None, "is_test_mode": False,

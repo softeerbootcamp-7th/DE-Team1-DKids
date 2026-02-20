@@ -1,8 +1,11 @@
 -- =====================================
 -- 1. Schema 생성
 -- =====================================
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 CREATE SCHEMA IF NOT EXISTS test;
-SET search_path TO test;
+SET search_path TO test, public;
 
 -- =====================================
 -- 2. Master Tables (Reference Data)
