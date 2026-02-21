@@ -318,6 +318,192 @@ def count_direct_matches(symptom_text: str, docs: list[dict[str, Any]]) -> int:
     )
 
 
+def compact_query(text: str, max_keywords: int = 10) -> str:
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in extract_keywords(text):
+        k = token.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(token)
+        if len(out) >= max_keywords:
+            break
+    return " ".join(out) if out else norm_space(text)
+
+
+def validate_symptom_similarity_batch(
+    api_key: str,
+    user_symptom: str,
+    candidates: list[dict[str, Any]],
+    keep_cutoff: float,
+    timeout_sec: int = 60,
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+
+    items = []
+    for c in candidates:
+        items.append({
+            "id": int(c["id"]),
+            "candidate_symptom_text": norm_space(c.get("symptom_text", "")),
+            "evidence_text": norm_space(c.get("evidence_text", "")),
+            "system_category": norm_space(c.get("system_category", "")),
+            "document_source": norm_space(c.get("document_source", "")),
+        })
+
+    prompt = (
+        "너는 자동차 증상 유사도 검증 에이전트다.\n"
+        "입력된 user_symptom과 candidate_symptom_text가 실제로 같은 증상 계열인지 판정하라.\n"
+        "JSON만 출력:\n"
+        "{\n"
+        '  "results":[{"id":123,"similarity_score":0.0,"keep":true,"reason":"한 줄"}]\n'
+        "}\n"
+        f"keep 기준: similarity_score >= {keep_cutoff:.2f}\n"
+        "주의: 단순 키워드 겹침만으로 keep 금지.\n\n"
+        f"[user_symptom]\n{norm_space(user_symptom)}\n\n"
+        f"[candidates]\n{json.dumps(items, ensure_ascii=False)}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
+    }
+    resp = requests.post(
+        f"{DEFAULT_GEMINI_URL}?key={api_key}",
+        headers={"Content-Type": "application/json"},
+        json=payload, timeout=timeout_sec,
+    )
+    if not resp.ok:
+        raise RuntimeError(f"유사도 검증 API 실패(status={resp.status_code}): {resp.text[:300]}")
+
+    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    parsed = json.loads(strip_json_fence(text))
+    if not isinstance(parsed, dict):
+        return []
+
+    results = []
+    for r in parsed.get("results", []):
+        try:
+            doc_id = int(r.get("id"))
+            score = float(r.get("similarity_score", 0.0) or 0.0)
+            keep = bool(r.get("keep", False)) and score >= keep_cutoff
+            reason = norm_space(r.get("reason", ""))
+            results.append({
+                "id": doc_id,
+                "similarity_score": score,
+                "keep": keep,
+                "reason": reason,
+            })
+        except Exception:
+            continue
+    return results
+
+
+def iterative_retrieve_and_validate(
+    conn,
+    api_key: str,
+    user_symptom: str,
+    model_code: str,
+    embed_model: str,
+    systems: list[str] | None = None,
+    top_k: int = 20,
+    max_iterations: int = 3,
+    keep_cutoff: float = 0.72,
+    min_keep: int = 2,
+    max_keep: int = 5,
+    min_avg_score: float = 0.65,
+    keyword_boost_weight: float = 0.0,
+) -> dict[str, Any]:
+    query = norm_space(user_symptom)
+    traces: list[dict[str, Any]] = []
+    final_kept: list[dict[str, Any]] = []
+    status = "insufficient_evidence"
+    used_model_docs = 0
+    used_common_docs = 0
+    model_phase_max_iter = min(2, max_iterations)
+
+    for i in range(1, max_iterations + 1):
+        in_model_phase = i <= model_phase_max_iter
+        phase = "model_only" if in_model_phase else "common_fallback"
+        phase_model = model_code if in_model_phase else "common"
+
+        candidates = retrieve_hybrid(
+            conn, query, phase_model, embed_model, top_k, systems=systems or None
+        )
+        candidates = apply_keyword_boost(candidates, query, keyword_boost_weight)
+
+        if in_model_phase:
+            used_model_docs += len(candidates)
+        else:
+            used_common_docs += len(candidates)
+
+        if not api_key:
+            kept = candidates[:max_keep]
+            traces.append({
+                "iteration": i,
+                "phase": phase,
+                "model_used": phase_model,
+                "query": query,
+                "candidate_count": len(candidates),
+                "kept_count": len(kept),
+                "avg_similarity_score": 0.0,
+            })
+            final_kept = kept
+            status = "insufficient_evidence"
+            break
+
+        validated = validate_symptom_similarity_batch(api_key, user_symptom, candidates, keep_cutoff)
+        vmap = {int(v["id"]): v for v in validated}
+        scored = []
+        for c in candidates:
+            did = int(c["id"])
+            v = vmap.get(did, {"similarity_score": 0.0, "keep": False, "reason": "검증 결과 없음"})
+            item = dict(c)
+            item["similarity_score"] = float(v.get("similarity_score", 0.0) or 0.0)
+            item["keep"] = bool(v.get("keep", False))
+            item["reason"] = norm_space(v.get("reason", ""))
+            scored.append(item)
+
+        kept = [x for x in scored if x.get("keep", False)]
+        kept.sort(
+            key=lambda x: (float(x.get("similarity_score", 0.0) or 0.0), float(x.get("score", 0.0) or 0.0)),
+            reverse=True,
+        )
+        kept = kept[:max_keep]
+        avg_score = (
+            sum(float(x.get("similarity_score", 0.0) or 0.0) for x in kept) / len(kept)
+            if kept else 0.0
+        )
+        traces.append({
+            "iteration": i,
+            "phase": phase,
+            "model_used": phase_model,
+            "query": query,
+            "candidate_count": len(candidates),
+            "kept_count": len(kept),
+            "avg_similarity_score": round(avg_score, 4),
+        })
+
+        final_kept = kept
+        if len(kept) >= min_keep and avg_score >= min_avg_score:
+            status = "ok"
+            break
+
+        if i < max_iterations:
+            if i == model_phase_max_iter:
+                query = norm_space(user_symptom)
+            else:
+                query = compact_query(query)
+
+    return {
+        "status": status,
+        "kept_docs": final_kept,
+        "traces": traces,
+        "used_model_docs": used_model_docs,
+        "used_common_docs": used_common_docs,
+    }
+
+
 # ─────────────────────────────────────────────
 # 진단 요약
 # ─────────────────────────────────────────────
@@ -479,40 +665,55 @@ def run_symptom_rag_diagnosis(
 
     symptom_results, matching_results = [], []
     total_model_docs = total_common_docs = 0
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
     embed_model = os.getenv("RAG_EMBED_MODEL", DEFAULT_EMBED_MODEL).strip() or DEFAULT_EMBED_MODEL
-    top_k_model = 8
-    top_k_common = 5
-    min_model_hits = 3
-    min_direct_matches = 1
     min_model_score = 0.02
     min_evidence_score = 0.02
     evidence_per_symptom = 3
     keyword_boost_weight = 0.0
+    top_k_candidates = 20
+    max_iterations = 3
+    keep_cutoff = 0.72
+    min_keep = 2
+    max_keep = 5
+    min_avg_score = 0.65
 
     for symptom in symptoms:
         inferred = infer_system_filters(symptom)
-        model_docs = retrieve_hybrid(
-            conn, symptom, model_code, embed_model, top_k_model, systems=inferred or None
+        iter_result = iterative_retrieve_and_validate(
+            conn=conn,
+            api_key=api_key,
+            user_symptom=symptom,
+            model_code=model_code,
+            embed_model=embed_model,
+            systems=inferred or None,
+            top_k=top_k_candidates,
+            max_iterations=max_iterations,
+            keep_cutoff=keep_cutoff,
+            min_keep=min_keep,
+            max_keep=max_keep,
+            min_avg_score=min_avg_score,
+            keyword_boost_weight=keyword_boost_weight,
         )
-        model_docs = apply_keyword_boost(model_docs, symptom, keyword_boost_weight)
-        top_score = float(model_docs[0].get("score", 0.0) or 0.0) if model_docs else 0.0
-        direct_match_count = count_direct_matches(symptom, model_docs)
-        common_docs: list[dict[str, Any]] = []
-        if (
-            (len(model_docs) < min_model_hits)
-            or (top_score < min_model_score)
-            or (direct_match_count < min_direct_matches)
-        ):
-            common_docs = retrieve_hybrid(
-                conn, symptom, "common", embed_model, top_k_common, systems=inferred or None
-            )
-            common_docs = apply_keyword_boost(common_docs, symptom, keyword_boost_weight)
-
-        total_model_docs += len(model_docs)
-        total_common_docs += len(common_docs)
-
-        merged = sorted(model_docs + common_docs, key=lambda x: float(x.get("score", 0) or 0), reverse=True)
+        merged = sorted(
+            iter_result.get("kept_docs", []),
+            key=lambda x: (
+                float(x.get("similarity_score", 0.0) or 0.0),
+                float(x.get("score", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )
         filtered = [d for d in merged if float(d.get("score", 0) or 0) >= min_evidence_score]
+        direct_match_count = count_direct_matches(symptom, merged)
+        total_model_docs += int(iter_result.get("used_model_docs", 0) or 0)
+        total_common_docs += int(iter_result.get("used_common_docs", 0) or 0)
+
+        if not merged:
+            fallback = retrieve_hybrid(conn, symptom, model_code, embed_model, 5, systems=inferred or None)
+            fallback = apply_keyword_boost(fallback, symptom, keyword_boost_weight)
+            merged = fallback
+            filtered = [d for d in merged if float(d.get("score", 0) or 0) >= min_model_score][:evidence_per_symptom]
+
         matching_results.append({
             "symptom_text": symptom,
             "match_docs": merged,
@@ -522,8 +723,10 @@ def run_symptom_rag_diagnosis(
             "symptom_text": symptom,
             "direct_match_count_model": direct_match_count,
             "inferred_system_filters": inferred,
-            "used_model_docs": len(model_docs),
-            "used_common_docs": len(common_docs),
+            "used_model_docs": int(iter_result.get("used_model_docs", 0) or 0),
+            "used_common_docs": int(iter_result.get("used_common_docs", 0) or 0),
+            "match_status": iter_result.get("status", "insufficient_evidence"),
+            "match_traces": iter_result.get("traces", []),
             "evidence_docs": filtered[:evidence_per_symptom],
         })
 
@@ -534,7 +737,6 @@ def run_symptom_rag_diagnosis(
         else "no_evidence"
     )
 
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         return {
             "diagnosis_text": f"[근거: {evidence_scope}] GEMINI_API_KEY가 없어 LLM 진단을 생략했습니다.",
