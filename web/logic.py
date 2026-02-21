@@ -4,12 +4,15 @@ import requests
 import pandas as pd
 import streamlit as st
 from typing import Optional, Any
+from functools import lru_cache
 
 from config import (
     ENV, USER_EMAIL, DEFAULT_GEMINI_URL,
     SYSTEM_KEYWORD_RULES, CONSUMABLE_PART_KEYWORDS,
 )
 import os
+
+DEFAULT_EMBED_MODEL = "intfloat/multilingual-e5-large-instruct"
 
 
 # ─────────────────────────────────────────────
@@ -187,6 +190,124 @@ def retrieve_lexical(
     return df.to_dict(orient="records") if not df.empty else []
 
 
+def to_e5_instruction_text(text: str) -> str:
+    clean = norm_space(text)
+    return f"Instruct: Match semantically similar automotive symptom descriptions.\nQuery: {clean}"
+
+
+@lru_cache(maxsize=2)
+def get_embedder(model_name: str):
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(model_name)
+
+
+def embed_query_text(text: str, embed_model: str) -> list[float]:
+    embedder = get_embedder(embed_model)
+    vec = embedder.encode(to_e5_instruction_text(text), normalize_embeddings=True)
+    return vec.tolist()
+
+
+def _to_pgvector_literal(values: list[float]) -> str:
+    return "[" + ",".join(f"{float(v):.8f}" for v in values) + "]"
+
+
+def retrieve_vector(
+    conn,
+    query_text: str,
+    model_code: str,
+    embed_model: str,
+    top_k: int,
+    systems: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    qvec = _to_pgvector_literal(embed_query_text(query_text, embed_model))
+    where_sql = "WHERE vehicle_model = %s"
+    params: list[Any] = [qvec, model_code]
+    if systems:
+        where_sql += " AND system_category = ANY(%s)"
+        params.append(systems)
+    params.extend([qvec, top_k])
+
+    df = pd.read_sql(
+        f"""
+        SELECT
+            id, document_source, vehicle_model,
+            (1 - (symptom_embedding <=> %s::vector)) AS score,
+            symptom_text, system_category, repair_parts,
+            pre_replace_check_rule, evidence_text
+        FROM test.repair_doc_chunks
+        {where_sql}
+        ORDER BY symptom_embedding <=> %s::vector
+        LIMIT %s
+        """,
+        conn, params=tuple(params),
+    )
+    return df.to_dict(orient="records") if not df.empty else []
+
+
+def keyword_overlap_count(symptom_text: str, doc: dict[str, Any]) -> int:
+    keys = set(extract_keywords(symptom_text))
+    if not keys:
+        return 0
+    hay = norm_space(doc.get("symptom_text", ""))
+    return sum(1 for k in keys if k in hay)
+
+
+def apply_keyword_boost(
+    docs: list[dict[str, Any]], symptom_text: str, weight: float,
+) -> list[dict[str, Any]]:
+    boosted: list[dict[str, Any]] = []
+    for d in docs:
+        hits = keyword_overlap_count(symptom_text, d)
+        item = dict(d)
+        item["vector_score"] = float(d.get("score", 0.0) or 0.0)
+        item["keyword_hits"] = hits
+        item["keyword_boost"] = hits * weight
+        item["score"] = item["vector_score"] + item["keyword_boost"]
+        boosted.append(item)
+    boosted.sort(key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+    return boosted
+
+
+def retrieve_hybrid(
+    conn,
+    symptom_text: str,
+    model_code: str,
+    embed_model: str,
+    top_k: int,
+    systems: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    fetch_k = max(top_k * 4, top_k)
+    vector_docs = retrieve_vector(
+        conn, f"증상: {symptom_text}", model_code, embed_model, fetch_k, systems=systems
+    )
+    lexical_docs = retrieve_lexical(conn, symptom_text, model_code, fetch_k, systems=systems)
+
+    vector_rank_by_id = {int(d["id"]): idx for idx, d in enumerate(vector_docs, start=1)}
+    lexical_rank_by_id = {int(d["id"]): idx for idx, d in enumerate(lexical_docs, start=1)}
+
+    docs_by_id: dict[int, dict[str, Any]] = {}
+    for d in vector_docs:
+        docs_by_id[int(d["id"])] = dict(d)
+    for d in lexical_docs:
+        doc_id = int(d["id"])
+        if doc_id not in docs_by_id:
+            docs_by_id[doc_id] = dict(d)
+
+    rrf_k = 60.0
+    fused: list[dict[str, Any]] = []
+    for doc_id, d in docs_by_id.items():
+        rv = 1.0 / (rrf_k + vector_rank_by_id[doc_id]) if doc_id in vector_rank_by_id else 0.0
+        rl = 1.0 / (rrf_k + lexical_rank_by_id[doc_id]) if doc_id in lexical_rank_by_id else 0.0
+        item = dict(d)
+        item["vector_rrf"] = rv
+        item["lexical_rrf"] = rl
+        item["score"] = rv + rl
+        fused.append(item)
+
+    fused.sort(key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+    return fused[:top_k]
+
+
 def count_direct_matches(symptom_text: str, docs: list[dict[str, Any]]) -> int:
     keys = extract_keywords(symptom_text)
     if not keys:
@@ -358,22 +479,53 @@ def run_symptom_rag_diagnosis(
 
     symptom_results, matching_results = [], []
     total_model_docs = total_common_docs = 0
+    embed_model = os.getenv("RAG_EMBED_MODEL", DEFAULT_EMBED_MODEL).strip() or DEFAULT_EMBED_MODEL
+    top_k_model = 8
+    top_k_common = 5
+    min_model_hits = 3
+    min_direct_matches = 1
+    min_model_score = 0.02
+    min_evidence_score = 0.02
+    evidence_per_symptom = 3
+    keyword_boost_weight = 0.0
 
     for symptom in symptoms:
-        inferred   = infer_system_filters(symptom)
-        model_docs = retrieve_lexical(conn, symptom, model_code, top_k=8, systems=inferred or None)
+        inferred = infer_system_filters(symptom)
+        model_docs = retrieve_hybrid(
+            conn, symptom, model_code, embed_model, top_k_model, systems=inferred or None
+        )
+        model_docs = apply_keyword_boost(model_docs, symptom, keyword_boost_weight)
+        top_score = float(model_docs[0].get("score", 0.0) or 0.0) if model_docs else 0.0
         direct_match_count = count_direct_matches(symptom, model_docs)
-        common_docs = []
-        if len(model_docs) < 3 or direct_match_count < 1:
-            common_docs = retrieve_lexical(conn, symptom, "common", top_k=5, systems=inferred or None)
+        common_docs: list[dict[str, Any]] = []
+        if (
+            (len(model_docs) < min_model_hits)
+            or (top_score < min_model_score)
+            or (direct_match_count < min_direct_matches)
+        ):
+            common_docs = retrieve_hybrid(
+                conn, symptom, "common", embed_model, top_k_common, systems=inferred or None
+            )
+            common_docs = apply_keyword_boost(common_docs, symptom, keyword_boost_weight)
 
         total_model_docs += len(model_docs)
         total_common_docs += len(common_docs)
 
-        merged   = sorted(model_docs + common_docs, key=lambda x: float(x.get("score", 0) or 0), reverse=True)
-        filtered = [d for d in merged if float(d.get("score", 0) or 0) >= 0.02]
-        matching_results.append({"symptom_text": symptom, "match_docs": merged, "evidence_docs": filtered[:3]})
-        symptom_results.append({"symptom_text": symptom, "direct_match_count_model": direct_match_count, "evidence_docs": filtered[:3]})
+        merged = sorted(model_docs + common_docs, key=lambda x: float(x.get("score", 0) or 0), reverse=True)
+        filtered = [d for d in merged if float(d.get("score", 0) or 0) >= min_evidence_score]
+        matching_results.append({
+            "symptom_text": symptom,
+            "match_docs": merged,
+            "evidence_docs": filtered[:evidence_per_symptom],
+        })
+        symptom_results.append({
+            "symptom_text": symptom,
+            "direct_match_count_model": direct_match_count,
+            "inferred_system_filters": inferred,
+            "used_model_docs": len(model_docs),
+            "used_common_docs": len(common_docs),
+            "evidence_docs": filtered[:evidence_per_symptom],
+        })
 
     evidence_scope = (
         "hyundai_model_pdf_plus_common" if total_model_docs > 0 and total_common_docs > 0
