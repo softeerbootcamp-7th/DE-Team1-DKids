@@ -19,6 +19,11 @@ def get_connection() -> Optional[psycopg2.extensions.connection]:
             user=os.getenv("DB_USER"),
             password=os.getenv("DB_PASSWORD")
         )
+        try:
+            from pgvector.psycopg2 import register_vector
+            register_vector(conn)
+        except Exception:
+            pass
         return conn
     except Exception as e:
         print(f"DB Connection Error: {e}")
