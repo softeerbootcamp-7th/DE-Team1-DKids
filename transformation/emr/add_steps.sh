@@ -4,6 +4,7 @@ set -euo pipefail
 : "${REGION:?Need REGION}"
 : "${CLUSTER_ID:?Need CLUSTER_ID}"
 : "${DT:?Need DT (YYYY-MM-DD)}"
+: "${RUN_ID:?Need RUN_ID (e.g. 20260219_114712)}"
 : "${CODE_S3_PREFIX:?Need CODE_S3_PREFIX}"
 : "${RAW_S3_PREFIX:?Need RAW_S3_PREFIX}"
 : "${CLEAN_S3_PREFIX:?Need CLEAN_S3_PREFIX}"
@@ -19,7 +20,7 @@ aws emr add-steps \
       \"ActionOnFailure\":\"CONTINUE\",
       \"Jar\":\"command-runner.jar\",
       \"Args\":[\"spark-submit\",\"${CODE_S3_PREFIX}/preprocess_partsro.py\",
-              \"--input\",\"${RAW_S3_PREFIX}/partsro/final/\",
+              \"--input\",\"${RAW_S3_PREFIX}/partsro/final/${RUN_ID}/final.csv\",
               \"--output\",\"${CLEAN_S3_PREFIX}/partsro/dt=${DT}/\",
               \"--dt\",\"${DT}\"]
     },
@@ -29,7 +30,7 @@ aws emr add-steps \
       \"ActionOnFailure\":\"CONTINUE\",
       \"Jar\":\"command-runner.jar\",
       \"Args\":[\"spark-submit\",\"${CODE_S3_PREFIX}/preprocess_hyunki_store.py\",
-              \"--input\",\"${RAW_S3_PREFIX}/hyunki_store/final/\",
+              \"--input\",\"${RAW_S3_PREFIX}/hyunki_store/final/${RUN_ID}/final.csv\",
               \"--output\",\"${CLEAN_S3_PREFIX}/hyunki_store/dt=${DT}/\",
               \"--dt\",\"${DT}\"]
     },
@@ -39,7 +40,7 @@ aws emr add-steps \
       \"ActionOnFailure\":\"CONTINUE\",
       \"Jar\":\"command-runner.jar\",
       \"Args\":[\"spark-submit\",\"${CODE_S3_PREFIX}/preprocess_hyunki_market.py\",
-              \"--input\",\"${RAW_S3_PREFIX}/hyunki_market/final/\",
+              \"--input\",\"${RAW_S3_PREFIX}/hyunki_market/final/${RUN_ID}/final.csv\",
               \"--output\",\"${CLEAN_S3_PREFIX}/hyunki_market/dt=${DT}/\",
               \"--dt\",\"${DT}\"]
     },
