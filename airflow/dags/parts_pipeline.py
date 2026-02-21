@@ -145,15 +145,26 @@ with DAG(
         }
 
     @task
-    def build_emr_steps() -> list:
+    def build_emr_steps(retry_inputs: Dict[str, Dict]) -> list:
         """Build EMR steps for preprocessing and summary generation."""
         context = get_current_context()
-        effective_ds, _, _ = resolve_effective_ds(context)
+        effective_ds, effective_ds_nodash, _ = resolve_effective_ds(context)
+        ts_nodash = context["ts_nodash"]
+        base_run_id = f"{effective_ds_nodash}_{ts_nodash}"
 
         code_prefix = norm_s3_prefix(Variable.get("CODE_S3_PREFIX"))
         raw_prefix = norm_s3_prefix(Variable.get("RAW_S3_PREFIX"))
         clean_prefix = norm_s3_prefix(Variable.get("CLEAN_S3_PREFIX"))
         mart_prefix = norm_s3_prefix(Variable.get("MART_S3_PREFIX"))
+
+        source_run_id = {source: base_run_id for source in SOURCES}
+        if isinstance(retry_inputs, dict):
+            for source in SOURCES:
+                payload = retry_inputs.get(source)
+                if isinstance(payload, dict):
+                    retry_run_id = payload.get("run_id")
+                    if isinstance(retry_run_id, str) and retry_run_id:
+                        source_run_id[source] = retry_run_id
 
         return [
             {
@@ -165,7 +176,7 @@ with DAG(
                         "spark-submit",
                         f"{code_prefix}/preprocess_partsro.py",
                         "--input",
-                        f"{raw_prefix}/partsro/final/dt={effective_ds}/",
+                        f"{raw_prefix}/partsro/final/dt={effective_ds}/{source_run_id['partsro']}/final.csv",
                         "--output",
                         f"{clean_prefix}/partsro/dt={effective_ds}/",
                         "--dt",
@@ -182,7 +193,7 @@ with DAG(
                         "spark-submit",
                         f"{code_prefix}/preprocess_hyunki_store.py",
                         "--input",
-                        f"{raw_prefix}/hyunki_store/final/dt={effective_ds}/",
+                        f"{raw_prefix}/hyunki_store/final/dt={effective_ds}/{source_run_id['hyunki_store']}/final.csv",
                         "--output",
                         f"{clean_prefix}/hyunki_store/dt={effective_ds}/",
                         "--dt",
@@ -199,7 +210,7 @@ with DAG(
                         "spark-submit",
                         f"{code_prefix}/preprocess_hyunki_market.py",
                         "--input",
-                        f"{raw_prefix}/hyunki_market/final/dt={effective_ds}/",
+                        f"{raw_prefix}/hyunki_market/final/dt={effective_ds}/{source_run_id['hyunki_market']}/final.csv",
                         "--output",
                         f"{clean_prefix}/hyunki_market/dt={effective_ds}/",
                         "--dt",
@@ -349,7 +360,7 @@ with DAG(
 
     @task
     def load_to_rds() -> None:
-        """Load the summary CSV from S3 into MySQL."""
+        """Load the summary CSV from S3 into PostgreSQL."""
         context = get_current_context()
         effective_ds, _, _ = resolve_effective_ds(context)
         mart_prefix = norm_s3_prefix(Variable.get("MART_S3_PREFIX"))
@@ -444,7 +455,7 @@ with DAG(
         message="{{ ti.xcom_pull(task_ids='run_retry_executions') }}",
     )
 
-    emr_steps = build_emr_steps()
+    emr_steps = build_emr_steps(retry_inputs)
 
     add_emr_steps = EmrAddStepsOperator(
         task_id="add_emr_steps",
