@@ -1,6 +1,6 @@
 ENV: str = "development"
 USER_EMAIL: str = "test@example.com"
-DEFAULT_GEMINI_URL: str = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+DEFAULT_GEMINI_URL: str = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 SYSTEM_KEYWORD_RULES: dict[str, list[str]] = {
     "엔진": ["엔진", "부조", "노킹", "진동", "소음", "터보", "부스트"],
