@@ -90,8 +90,11 @@ def build_df(spark: SparkSession, input_path: str, dt: Optional[str]):
     df = (
         spark.read.option("header", "true")
         .option("encoding", "utf-8")
+        .option("recursiveFileLookup", "true")
         .csv(input_path)
     )
+    if dt and "extracted_at" in df.columns:
+        df = df.where(F.col("extracted_at").startswith(dt))
 
     official_name = F.trim(F.col("official_name"))
     extracted_part = F.regexp_extract(official_name, r"\(([^()]+)\)\s*$", 1)
