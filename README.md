@@ -86,7 +86,7 @@
 - **사례 데이터**: 실제 정비 사례 및 사용자 경험 데이터
 
 ## 데이터 파이프라인 아키텍처
-<img src="images/architecture.jpg" style="width: 80%;"/>
+<img src="images/architecture.jpeg" style="width: 80%;"/>
 
 
 부품 데이터의 주기적 수집을 위해 Airflow 기반 AWS ETL 파이프라인을 구성했습니다.
