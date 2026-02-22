@@ -88,7 +88,7 @@ EMR에서는 아래 5개 Spark step이 순서대로 실행됩니다.
   - 서비스 적재에 사용할 마트 산출물 생성
 - 통합/집계 방식(핵심):
   - 입력: `clean/normalized` 데이터(3개 소스가 이미 합쳐진 상태)
-  - `part_no + car_type + source` 단위 대표명 기준 `min_price`, `max_price` 집
+  - `part_no + car_type + source` 단위 대표명 기준 `min_price`, `max_price` 집계
 
 - 최종 요약 마트 컬럼:
   - `part_official_name`
