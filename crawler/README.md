@@ -12,7 +12,7 @@
 <h3>문제 상황</h3>
 
 <ul>
-  <li>수집 대상 데이터: 약 <strong>19만건</strong></li>
+  <li>수집 대상 데이터: 약 <strong>19만건</strong></li>
   <li>로컬 단일 실행 기준 전체 크롤링 시간: <strong>20시간+</strong></li>
   <li>URL 단위 실패(404 / timeout / http error) 반복 발생 가능</li>
 </ul>
