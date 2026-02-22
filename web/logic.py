@@ -42,11 +42,23 @@ def strip_json_fence(text: str) -> str:
 
 def parse_llm_overrepair_verdict(diagnosis_text: str) -> Optional[bool]:
     text = re.sub(r"^\[[^\]]+\]\s*", "", norm_space(diagnosis_text or ""))
-    if text.startswith("견적서는 다음 이유로 과잉정비입니다."):
-        return True
-    if text.startswith("견적서는 현재 근거 기준 표준 범위입니다."):
+    if not text:
         return False
-    return None
+
+    # Force a binary UI outcome from varied LLM phrasing.
+    normal_keywords = ("표준 범위", "표준정비", "이상 없음")
+    over_keywords = ("과잉정비",)
+    negations = ("과잉정비가 아닙니다", "과잉정비 아님")
+
+    if any(k in text for k in negations):
+        return False
+    if any(k in text for k in normal_keywords):
+        return False
+    if any(k in text for k in over_keywords):
+        return True
+
+    # Fallback to normal to avoid ambiguous third-state UI.
+    return False
 
 
 def split_diagnosis_text_for_display(diagnosis_text: str) -> tuple[str, str]:
@@ -54,15 +66,65 @@ def split_diagnosis_text_for_display(diagnosis_text: str) -> tuple[str, str]:
         "hyundai_model_pdf_plus_common": "현대 정비 지침서 + 일반 정비 지침",
         "hyundai_model_pdf_only": "현대 정비 지침서",
         "common_only": "일반 정비 지침",
-        "no_evidence": "증거 불충분",
     }
     text = norm_space(diagnosis_text or "")
     m = re.match(r"^\[(근거:\s*[^\]]+)\]\s*(.*)$", text)
     if not m:
-        return text, ""
+        body = re.sub(r"\[(보조판단|근거):[^\]]+\]", "", text).strip()
+        body = norm_space(body)
+        return body, ""
     code_match = re.match(r"근거:\s*(.+)$", m.group(1))
     evidence_code = code_match.group(1).strip() if code_match else ""
-    return m.group(2).strip(), evidence_label_map.get(evidence_code, evidence_code)
+    body = re.sub(r"\[(보조판단|근거):[^\]]+\]", "", m.group(2)).strip()
+    body = norm_space(body)
+    evidence_label = evidence_label_map.get(evidence_code, "")
+    return body, evidence_label
+
+
+def doc_source_label(document_source: str) -> str:
+    source_map = {
+        "hyundai_model_pdf": "현대 차종 정비지침",
+        "common": "일반 정비 지침",
+    }
+    return source_map.get(norm_space(document_source), norm_space(document_source) or "문서 근거")
+
+
+def summarize_evidence_text(text: str, max_len: int = 120) -> str:
+    t = norm_space(text)
+    if not t:
+        return ""
+    return t if len(t) <= max_len else t[: max_len - 1].rstrip() + "…"
+
+
+def build_evidence_explanations(symptom_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for symptom_idx, sr in enumerate(symptom_results, start=1):
+        symptom = norm_space(sr.get("symptom_text", ""))
+        for evidence_idx, d in enumerate(sr.get("evidence_docs", []), start=1):
+            source_code = norm_space(d.get("document_source", ""))
+            source_label = doc_source_label(source_code)
+            system_category = norm_space(d.get("system_category", ""))
+            repair_parts = norm_space(d.get("repair_parts", ""))
+            evidence_excerpt = summarize_evidence_text(d.get("evidence_text", ""))
+            system_hint = f" ({system_category})" if system_category else ""
+            why_used = f"{symptom} 증상 판단에 참고한 {source_label}{system_hint} 문서 근거입니다."
+            content_desc = evidence_excerpt or "관련 근거 문구 요약 없음"
+            if repair_parts:
+                content_desc += f" (예상 정비항목: {repair_parts})"
+            items.append({
+                "tag": f"증상{symptom_idx}-근거{evidence_idx}",
+                "related_symptom": symptom,
+                "source_code": source_code,
+                "source_label": source_label,
+                "system_category": system_category,
+                "doc_id": int(d.get("id")) if d.get("id") is not None else None,
+                "document_symptom_text": norm_space(d.get("symptom_text", "")),
+                "repair_parts": repair_parts,
+                "evidence_excerpt": evidence_excerpt,
+                "description": content_desc,
+                "why_used": why_used,
+            })
+    return items
 
 
 def split_parts_text(text: str) -> list[str]:
@@ -600,26 +662,39 @@ def llm_diagnose_multi(
 - 정비소를 대리하지도, 고객을 대리하지도 말고 문서 근거 중심으로 중립적으로 판단한다.
 
 작성 원칙:
+- 판단 우선순위는 1) 제공된 근거 문서 2) 일반적인 정비 지식(LLM 추론) 순서다.
 - 증상별로 근거를 분리해서 해석하고, 마지막에 견적서 관점으로 종합한다.
 - 소모품은 이번 과잉정비 판단의 핵심 대상이 아니므로 소모품 자체의 교체 필요를 단정하지 않는다.
 - 각 증상 문구를 명시적으로 언급하고, 해당 증상과 견적 항목의 연관성을 직접 설명한다.
 - 증상과의 직접 연관 근거가 약하더라도 가능한 인과가 있으면 과잉정비로 단정하지 않는다.
 - 과잉정비 판정은 매우 보수적으로 한다. 명확한 무관 근거가 있을 때만 과잉정비로 표현한다.
+- 판단 근거를 말할 때는 제공된 근거 문서의 문장을 짧게 직접 인용한다.
+- 인용은 1개 이상, 가능하면 증상별로 1개씩 포함한다.
+- 인용 뒤에는 [근거: 현대 차종 정비지침] / [근거: 일반 정비 지침] 같은 의미 태그를 붙인다.
+- 제공된 문서에서 직접 근거를 찾기 어려운 경우에만 일반 정비 지식 기반의 보조 판단을 사용할 수 있다.
+- 이 경우 반드시 [보조판단: 일반 정비상식] 태그를 붙이고, 추정/추가 점검 필요임을 명시한다.
+- 문서 근거 없이 과잉정비로 단정하지 말고 설명 요청/추가 점검 권고 형태로 표현한다.
 
 문체:
 - 견적서 감수 리포트처럼 간결하고 실무적으로 작성한다.
+- 일반 차량 소유자(비전문가)가 읽어도 이해되도록 쉬운 표현을 우선 사용한다.
+- 기술 용어를 쓰면 짧게 풀어서 설명한다(예: 알터네이터(발전기)).
 - 진단문 첫 문장에 최종 판정을 명시한다.
   - 과잉 가능성이 높으면: "견적서는 다음 이유로 과잉정비입니다."
   - 과잉 단정이 어려우면: "견적서는 현재 근거 기준 표준 범위입니다."
 - 최소 2개 증상이 있으면 각 증상을 모두 1회 이상 직접 언급한다.
+- 가능하면 "근거 문서에 따르면", "근거 문서에는 ~라고 기재됨" 같은 표현으로 출처성을 드러낸다.
+- 문서 근거와 LLM 지식 기반 판단이 섞일 경우 문장을 분리해서 명확히 구분한다.
+- 마지막 문장에는 일반인 관점의 짧은 안내(정비소에 무엇을 확인/질문하면 좋은지)를 1문장 넣는다.
 
 출력은 JSON 객체만:
-{"diagnosis_text": "짧은 1문단(2~3문장)."}
+{"diagnosis_text": "짧은 1문단(2~4문장). 근거 태그 포함."}
 """
     symptom_blocks = []
     for idx, sr in enumerate(symptom_results, start=1):
         lines = [
-            f"[{i}] source={d['document_source']} score={float(d.get('score',0)):.4f} | "
+            f"[{i}] source={d['document_source']} ({doc_source_label(d.get('document_source', ''))}) "
+            f"score={float(d.get('score',0)):.4f} | "
             f"system={d.get('system_category','')} | expected={d.get('repair_parts','')} | "
             f"evidence={d.get('evidence_text','')}"
             for i, d in enumerate(sr["evidence_docs"], start=1)
@@ -631,6 +706,9 @@ def llm_diagnose_multi(
 
     full_prompt = (
         system_prompt + "\n\n"
+        + "중요: 제공된 문서 표현을 우선 근거로 쓰고, 문서에 없는 판단은 [보조판단: 일반 정비상식]으로 구분하라.\n"
+        + "중요: 근거 문서 인용이 어렵다면 '근거 문구가 부족함'을 먼저 적고, 보조 판단은 추정으로만 표현하라.\n"
+        + "출력 구성 권장: 1문장(최종판정) + 1~2문장(증상별 근거/보조판단 구분) + 1문장(일반인용 안내).\n\n"
         + f"견적 부품: {', '.join(quote_parts) if quote_parts else '(없음)'}\n\n"
         + "\n\n".join(symptom_blocks)
     )
@@ -661,7 +739,12 @@ def run_symptom_rag_diagnosis(
 ) -> dict[str, Any]:
     symptoms = split_symptoms(symptom_text)
     if not symptoms:
-        return {"diagnosis_text": "증상 입력이 없어 진단을 수행하지 않았습니다.", "symptom_results": [], "llm_called": False}
+        return {
+            "diagnosis_text": "증상 입력이 없어 진단을 수행하지 않았습니다.",
+            "symptom_results": [],
+            "evidence_explanations": [],
+            "llm_called": False,
+        }
 
     symptom_results, matching_results = [], []
     total_model_docs = total_common_docs = 0
@@ -736,11 +819,13 @@ def run_symptom_rag_diagnosis(
         else "common_only"              if total_common_docs > 0
         else "no_evidence"
     )
+    evidence_explanations = build_evidence_explanations(symptom_results)
 
     if not api_key:
         return {
             "diagnosis_text": f"[근거: {evidence_scope}] GEMINI_API_KEY가 없어 LLM 진단을 생략했습니다.",
             "evidence_scope": evidence_scope, "symptom_results": symptom_results,
+            "evidence_explanations": evidence_explanations,
             "possibly_unrelated_quote_parts": find_unrelated_quote_parts(quote_parts, matching_results),
             "llm_called": False,
         }
@@ -757,6 +842,7 @@ def run_symptom_rag_diagnosis(
         "diagnosis_text": f"[근거: {evidence_scope}] {diagnosis_text}",
         "evidence_scope": evidence_scope,
         "symptom_results": symptom_results,
+        "evidence_explanations": evidence_explanations,
         "possibly_unrelated_quote_parts": find_unrelated_quote_parts(quote_parts, matching_results),
         "llm_called": llm_called,
     }
@@ -800,14 +886,6 @@ from config import (
 import os
 from datetime import datetime
 import base64
-
-
-# -----------------------------
-# (기존 logic.py 내용 전부 동일)
-# -----------------------------
-# ⚠️ 기존 코드들은 그대로 두면 된다.
-# 여기서는 추가된 함수들만 아래에 붙인다.
-# -----------------------------
 
 
 # =========================================================
