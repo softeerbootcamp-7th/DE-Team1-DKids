@@ -157,14 +157,27 @@ with DAG(
         clean_prefix = norm_s3_prefix(Variable.get("CLEAN_S3_PREFIX"))
         mart_prefix = norm_s3_prefix(Variable.get("MART_S3_PREFIX"))
 
-        source_run_id = {source: base_run_id for source in SOURCES}
+        source_input_paths = {
+            source: [f"{raw_prefix}/{source}/final/dt={effective_ds}/{base_run_id}/final.csv"]
+            for source in SOURCES
+        }
         if isinstance(retry_inputs, dict):
             for source in SOURCES:
                 payload = retry_inputs.get(source)
                 if isinstance(payload, dict):
                     retry_run_id = payload.get("run_id")
-                    if isinstance(retry_run_id, str) and retry_run_id:
-                        source_run_id[source] = retry_run_id
+                    if (
+                        isinstance(retry_run_id, str)
+                        and retry_run_id
+                        and retry_run_id != base_run_id
+                    ):
+                        source_input_paths[source].append(
+                            f"{raw_prefix}/{source}/final/dt={effective_ds}/{retry_run_id}/final.csv"
+                        )
+
+        source_inputs_arg = {
+            source: ",".join(paths) for source, paths in source_input_paths.items()
+        }
 
         return [
             {
@@ -176,7 +189,7 @@ with DAG(
                         "spark-submit",
                         f"{code_prefix}/preprocess_partsro.py",
                         "--input",
-                        f"{raw_prefix}/partsro/final/dt={effective_ds}/{source_run_id['partsro']}/final.csv",
+                        source_inputs_arg["partsro"],
                         "--output",
                         f"{clean_prefix}/partsro/dt={effective_ds}/",
                         "--dt",
@@ -193,7 +206,7 @@ with DAG(
                         "spark-submit",
                         f"{code_prefix}/preprocess_hyunki_store.py",
                         "--input",
-                        f"{raw_prefix}/hyunki_store/final/dt={effective_ds}/{source_run_id['hyunki_store']}/final.csv",
+                        source_inputs_arg["hyunki_store"],
                         "--output",
                         f"{clean_prefix}/hyunki_store/dt={effective_ds}/",
                         "--dt",
@@ -210,7 +223,7 @@ with DAG(
                         "spark-submit",
                         f"{code_prefix}/preprocess_hyunki_market.py",
                         "--input",
-                        f"{raw_prefix}/hyunki_market/final/dt={effective_ds}/{source_run_id['hyunki_market']}/final.csv",
+                        source_inputs_arg["hyunki_market"],
                         "--output",
                         f"{clean_prefix}/hyunki_market/dt={effective_ds}/",
                         "--dt",

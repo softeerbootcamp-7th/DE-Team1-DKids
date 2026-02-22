@@ -111,17 +111,23 @@ def parse_car_types(raw: Optional[str]) -> List[str]:
     return deduped if deduped else ["All"]
 
 
+def _parse_input_paths(raw_input: str) -> List[str]:
+    paths = [p.strip() for p in raw_input.split(",") if p.strip()]
+    if not paths:
+        raise ValueError("At least one input path is required")
+    return paths
+
+
 def build_df(spark: SparkSession, input_path: str, dt: Optional[str]):
     parse_car_types_udf = F.udf(parse_car_types, T.ArrayType(T.StringType()))
+    input_paths = _parse_input_paths(input_path)
 
     df = (
         spark.read.option("header", "true")
         .option("encoding", "utf-8")
         .option("recursiveFileLookup", "true")
-        .csv(input_path)
+        .csv(input_paths)
     )
-    if dt and "extracted_at" in df.columns:
-        df = df.where(F.col("extracted_at").startswith(dt))
 
     name = F.regexp_replace(F.col("name"), r"\s*\([^()]*\)\s*$", "")
     part_no = F.trim(F.col("part_no"))
@@ -150,7 +156,7 @@ def build_df(spark: SparkSession, input_path: str, dt: Optional[str]):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Preprocess hyunki_market in Spark (v2)")
-    parser.add_argument("--input", required=True, help="Input CSV path")
+    parser.add_argument("--input", required=True, help="Input CSV path(s), comma-separated")
     parser.add_argument("--output", required=True, help="Output path")
     parser.add_argument("--dt", default=None, help="Partition date (YYYY-MM-DD)")
     parser.add_argument(
