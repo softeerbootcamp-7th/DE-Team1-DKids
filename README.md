@@ -24,7 +24,7 @@
         <a href="https://github.com/Sanghoon560">
           <img src="https://github.com/Sanghoon560.png" width="100" />
           <br />
-          <sub><b>이상훈  👑</b></sub>
+          <sub><b>👑이상훈</b></sub>
         </a>
       </td>
       <td align="center" width="200">
