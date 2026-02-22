@@ -95,5 +95,5 @@
 - [Airflow 구성 시 고려한 점](./airflow/README.md)
 -  [Crawler 구성 시 고려한 점](./crawler/README.md)
 - [전처리(Transformation) 시 고려한 점](./transformation/README.md)
-- [RAG 구성 시 고려한 점](./rag/README.md)
+- [RAG 구성 시 고려한 점](./web/rag/README.md)
 - [Web 서비스 구성 시 고려한 점](./web/README.md)
