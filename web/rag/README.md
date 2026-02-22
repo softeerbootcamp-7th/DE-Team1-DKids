@@ -131,7 +131,7 @@
 | `repair_parts` | `text` | 해당 증상과 직접적으로 연관된 교체/점검 대상 부품명 |
 | `pre_replace_check_rule` | `text` | 부품 교체 전 반드시 확인해야 하는 점검 조건/진단 절차(서술형). 과잉정비 판단 시 “선 점검 여부” 근거 |
 | `evidence_text` | `text` | 증상-부품 인과 관계를 설명하는 정비 근거 문장 또는 매뉴얼 인용 내용. LLM 근거 생성 참고용 |
-| `symptom_embedding` | `varchar` | `symptom_text` 임베딩 값을 문자열 형태로 저장한 컬럼. 벡터 유사도 검색용 |
+| `symptom_embedding` | `vector` | `symptom_text` 임베딩 값을 문자열 형태로 저장한 컬럼. 벡터 유사도 검색용 |
 
 #### 5.3 설계 의도
 - `symptom_text`를 중심으로 문서를 검색하고,
