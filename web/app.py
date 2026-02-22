@@ -2,6 +2,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from styles import inject_global_css
+
 from pages import render_upload_page, render_analysis_page
 
 load_dotenv()

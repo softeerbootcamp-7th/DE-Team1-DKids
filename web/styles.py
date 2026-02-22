@@ -149,6 +149,45 @@ def inject_global_css() -> None:
         to   { opacity: 1; transform: translateY(0); }
     }
 
+    /* ── AI 근거 상세 카드 ── */
+    .evidence-card {
+        border: 1px solid var(--gray-200);
+        background: #fff;
+        border-radius: 10px;
+        padding: 12px 13px;
+        margin: 8px 0;
+    }
+    .evidence-source {
+        font-size: 12px;
+        font-weight: 700;
+        color: #1d4ed8;
+        margin-bottom: 8px;
+    }
+    .evidence-row {
+        display: grid;
+        grid-template-columns: 82px 1fr;
+        gap: 8px;
+        align-items: start;
+        padding: 4px 0;
+    }
+    .evidence-row-reason {
+        margin-top: 3px;
+        padding-top: 8px;
+        border-top: 1px dashed var(--gray-200);
+    }
+    .evidence-label {
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--gray-500);
+        line-height: 1.5;
+    }
+    .evidence-value {
+        font-size: 12px;
+        color: var(--gray-700);
+        line-height: 1.6;
+        word-break: keep-all;
+    }
+
     /* ── 부품비 바 ── */
     .part-item { padding: 14px 0; border-bottom: 1px solid var(--gray-100); }
     .part-item:last-child { border-bottom: none; }

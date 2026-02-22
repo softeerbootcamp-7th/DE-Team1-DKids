@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 from typing import Any
 from datetime import datetime
+from html import escape
 from config import ENV
 from db import get_connection
 from logic import (
@@ -376,6 +377,36 @@ def _render_rag_section(rag_result, symptom_text, llm_overrepair) -> None:
             st.write(body)
             if evidence:
                 st.caption(f"근거: {evidence}")
+            evidence_items = rag_result.get("evidence_explanations") or []
+            if evidence_items:
+                st.caption("근거 상세")
+                for item in evidence_items:
+                    source_label = item.get("source_label", "문서 근거")
+                    related_symptom = item.get("related_symptom", "")
+                    evidence_excerpt = item.get("evidence_excerpt", "")
+                    repair_parts = item.get("repair_parts", "")
+                    blocks = [
+                        f'<div class="evidence-source">{escape(str(source_label))}</div>',
+                    ]
+                    if related_symptom:
+                        blocks.append(
+                            f'<div class="evidence-row"><span class="evidence-label">관련 증상</span>'
+                            f'<span class="evidence-value">{escape(str(related_symptom))}</span></div>'
+                        )
+                    if evidence_excerpt:
+                        blocks.append(
+                            f'<div class="evidence-row"><span class="evidence-label">근거 요약</span>'
+                            f'<span class="evidence-value">{escape(str(evidence_excerpt))}</span></div>'
+                        )
+                    if repair_parts:
+                        blocks.append(
+                            f'<div class="evidence-row"><span class="evidence-label">예상 정비항목</span>'
+                            f'<span class="evidence-value">{escape(str(repair_parts))}</span></div>'
+                        )
+                    st.markdown(
+                        f'<div class="evidence-card">{"".join(blocks)}</div>',
+                        unsafe_allow_html=True,
+                    )
         st.markdown('</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
