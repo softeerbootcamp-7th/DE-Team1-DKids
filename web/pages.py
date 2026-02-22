@@ -93,7 +93,8 @@ def render_upload_page() -> None:
                 st.warning("이미지를 업로드하세요.")
                 return
 
-            conn = get_connection()
+            # 진단 시작 버튼은 EC2 실제 DB 사용
+            conn = get_connection(mode="prod")
             if not conn:
                 st.error("데이터베이스에 연결할 수 없습니다.")
                 return
@@ -118,7 +119,7 @@ def render_upload_page() -> None:
                 st.success("견적서 저장 완료")
 
                 # 4️⃣ 기존 분석 흐름 유지
-                _start_diagnosis(symptom_text, new_estimate_id)
+                _start_diagnosis(symptom_text, new_estimate_id, is_test=False)
 
             except Exception as e:
                 conn.rollback()
@@ -136,6 +137,7 @@ def render_upload_page() -> None:
             </div>
             """, unsafe_allow_html=True)
             if st.button("샘플 데이터로 체험하기", use_container_width=True):
+                # 샘플 데이터 버튼은 로컬 DB 사용
                 _start_diagnosis(symptom_text, "EST_20260216_001", is_test=True)
 
 
@@ -143,7 +145,10 @@ def _start_diagnosis(symptom_text: str, estimate_id: str, is_test: bool = False)
     st.session_state.symptom_text  = symptom_text.strip()
     st.session_state.rag_result    = None
     st.session_state.rag_result_key = ""
-    conn = get_connection()
+
+    # is_test면 로컬 DB, 아니면 EC2 실제 DB
+    mode = "local" if is_test else "prod"
+    conn = get_connection(mode=mode)
     if not conn:
         st.error("데이터베이스에 연결할 수 없습니다.")
         return
@@ -166,7 +171,10 @@ def _start_diagnosis(symptom_text: str, estimate_id: str, is_test: bool = False)
 
 def render_analysis_page() -> None:
     render_topbar()
-    conn = get_connection()
+
+    # is_test_mode에 따라 DB 선택
+    mode = "local" if st.session_state.get("is_test_mode") else "prod"
+    conn = get_connection(mode=mode)
     if not conn:
         st.error("데이터베이스에 연결할 수 없습니다.")
         return
@@ -239,7 +247,7 @@ def render_analysis_page() -> None:
 
 def _load_estimate_data(conn, eid: str):
     meta = pd.read_sql(
-        "SELECT car_type, service_finish_at FROM test.estimates WHERE id = %s LIMIT 1",
+        "SELECT car_type, service_finish_at FROM estimates WHERE id = %s LIMIT 1",
         conn, params=(eid,),
     )
     if meta.empty and eid == "EST_FROM_UPLOAD" and ENV == "development":
@@ -247,17 +255,17 @@ def _load_estimate_data(conn, eid: str):
         eid  = "EST_20260216_001"
         st.session_state.estimate_id = eid
         meta = pd.read_sql(
-            "SELECT car_type, service_finish_at FROM test.estimates WHERE id = %s LIMIT 1",
+            "SELECT car_type, service_finish_at FROM estimates WHERE id = %s LIMIT 1",
             conn, params=(eid,),
         )
 
     parts_df = pd.read_sql("""
         SELECT p.part_official_name, p.unit_price, pm.min_price, pm.max_price
-        FROM  test.parts p
-        JOIN  test.estimates e ON p.estimate_id = e.id
+        FROM  parts p
+        JOIN  estimates e ON p.estimate_id = e.id
         LEFT  JOIN LATERAL (
             SELECT min_price, max_price
-            FROM   test.parts_master pm
+            FROM   parts_master pm
             WHERE  pm.part_official_name = p.part_official_name
               AND  pm.car_type           = e.car_type
               AND  pm.extracted_at       = e.service_finish_at
@@ -269,9 +277,9 @@ def _load_estimate_data(conn, eid: str):
         SELECT l.repair_content, l.tech_fee,
                lm.standard_repair_time, lm.hour_labor_rate, lm.change_cycle,
                e.car_mileage, e.car_type, e.service_finish_at
-        FROM  test.labor l
-        JOIN  test.estimates e ON l.estimate_id = e.id
-        LEFT  JOIN test.labor_master lm
+        FROM  labor l
+        JOIN  estimates e ON l.estimate_id = e.id
+        LEFT  JOIN labor_master lm
             ON  lm.repair_content = l.repair_content
             AND lm.car_type       = e.car_type
             AND e.service_finish_at BETWEEN lm.start_date AND lm.end_date
@@ -453,7 +461,7 @@ def _render_cycle_section(summary, labor_df, conn, eid) -> None:
             curr_m = int(labor_df.iloc[0]["car_mileage"])
             for _, row in labor_df.iterrows():
                 cyc = row.get("change_cycle")
-                if cyc is None or (isinstance(cyc, float) and pd.isna(cyc)):
+                if cyc is None or (isinstance(cyc, float) and pd.isna(cyc)) or cyc <= 0:
                     continue
                 has_cycle = True
                 prev_m    = get_prev_mileage(conn, row["repair_content"], eid)
