@@ -263,12 +263,24 @@ def _load_estimate_data(conn, eid: str):
         SELECT p.part_official_name, p.unit_price, pm.min_price, pm.max_price
         FROM  parts p
         JOIN  estimates e ON p.estimate_id = e.id
-        LEFT  JOIN LATERAL (
+        LEFT JOIN LATERAL (
             SELECT min_price, max_price
             FROM   parts_master pm
             WHERE  pm.part_official_name = p.part_official_name
-              AND  pm.car_type           = e.car_type
-              AND  pm.extracted_at       = e.service_finish_at
+              AND  (
+                    pm.car_type = e.car_type
+                    OR pm.car_type = 'all'
+                    OR pm.car_type = 'unknown'
+                )
+              AND  pm.extracted_at = e.service_finish_at
+            ORDER BY
+                CASE
+                    WHEN pm.car_type = e.car_type THEN 1
+                    WHEN pm.car_type = 'ALL' THEN 2
+                    WHEN pm.car_type = 'unknown' THEN 3
+                    ELSE 4
+                END
+            LIMIT 1
         ) pm ON TRUE
         WHERE p.estimate_id = %s
     """, conn, params=(eid,))
