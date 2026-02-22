@@ -9,6 +9,10 @@
 `transformation` 단계는 크롤링 결과(raw CSV)를 그대로 쓰지 않고,  
 EMR(Spark)에서 소스별 전처리와 차종 정규화를 거쳐 서비스 적재용 요약 데이터를 만드는 파이프라인입니다.
 
+Transform 단계에서는 **S3에 저장된 ETL 코드와 Raw Zone 데이터가 Amazon EMR로 전달**되어 Spark 기반 변환 작업이 수행됩니다.
+EMR 클러스터는 S3 ETL Code Bucket에 저장된 스파크 애플리케이션을 실행하고, S3 Data Lake의 Raw Zone 데이터를 입력으로 받아 정제·가공·집계 처리를 수행합니다.
+작업 수행 중 생성되는 실행 로그는 S3 EMR Log Bucket에 저장되어 모니터링과 디버깅에 활용되며, 변환 완료 데이터는 다시 S3의 Clean/Mart 영역에 적재됩니다.
+
 Airflow DAG의 EMR step 구성(`build_emr_steps`) 기준으로 순차 실행됩니다.
 
 ---
