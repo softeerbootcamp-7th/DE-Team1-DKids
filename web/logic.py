@@ -198,8 +198,8 @@ def find_unrelated_quote_parts(quote_parts: list[str], matching_results: list[di
 def get_prev_mileage(conn, repair_content: str, estimate_id: str) -> Optional[int]:
     df = pd.read_sql("""
         SELECT e.car_mileage
-        FROM test.labor l
-        JOIN test.estimates e ON l.estimate_id = e.id
+        FROM labor l
+        JOIN estimates e ON l.estimate_id = e.id
         WHERE l.repair_content = %s
           AND e.customer_id   = %s
           AND e.id            <> %s
@@ -242,7 +242,7 @@ def retrieve_lexical(
             ) AS score,
             symptom_text, system_category, repair_parts,
             pre_replace_check_rule, evidence_text
-        FROM  test.repair_doc_chunks
+        FROM  repair_doc
         {where_sql}
         ORDER BY score DESC
         LIMIT %s
@@ -296,7 +296,7 @@ def retrieve_vector(
             (1 - (symptom_embedding <=> %s::vector)) AS score,
             symptom_text, system_category, repair_parts,
             pre_replace_check_rule, evidence_text
-        FROM test.repair_doc_chunks
+        FROM repair_doc
         {where_sql}
         ORDER BY symptom_embedding <=> %s::vector
         LIMIT %s
@@ -850,13 +850,13 @@ def run_symptom_rag_diagnosis(
 
 def precompute_rag_for_estimate(conn, estimate_id: str, symptom_text: str) -> str:
     eid  = estimate_id
-    meta = pd.read_sql("SELECT car_type FROM test.estimates WHERE id = %s LIMIT 1", conn, params=(eid,))
+    meta = pd.read_sql("SELECT car_type FROM estimates WHERE id = %s LIMIT 1", conn, params=(eid,))
     if meta.empty and eid == "EST_FROM_UPLOAD" and ENV == "development":
         eid  = "EST_20260216_001"
-        meta = pd.read_sql("SELECT car_type FROM test.estimates WHERE id = %s LIMIT 1", conn, params=(eid,))
+        meta = pd.read_sql("SELECT car_type FROM estimates WHERE id = %s LIMIT 1", conn, params=(eid,))
 
     car_type   = meta.iloc[0]["car_type"] if not meta.empty else "차량 정보 없음"
-    parts_df   = pd.read_sql("SELECT part_official_name FROM test.parts WHERE estimate_id = %s", conn, params=(eid,))
+    parts_df   = pd.read_sql("SELECT part_official_name FROM parts WHERE estimate_id = %s", conn, params=(eid,))
     quote_parts = list(dict.fromkeys(
         x for x in (norm_space(v) for v in parts_df["part_official_name"].dropna()) if x
     ))
@@ -968,13 +968,13 @@ def insert_estimate(conn, estimate_id: str, data: dict):
     cur = conn.cursor()
 
     # 중복 체크
-    cur.execute("SELECT 1 FROM test.estimates WHERE id = %s", (estimate_id,))
+    cur.execute("SELECT 1 FROM estimates WHERE id = %s", (estimate_id,))
     if cur.fetchone():
         raise RuntimeError("이미 존재하는 견적서 ID입니다.")
 
     # estimates
     cur.execute("""
-        INSERT INTO test.estimates
+        INSERT INTO estimates
         (id, customer_id, image_url, car_type, car_mileage, service_finish_at, created_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
     """, (
@@ -990,7 +990,7 @@ def insert_estimate(conn, estimate_id: str, data: dict):
     # parts
     for idx, p in enumerate(data.get("parts", []), start=1):
         cur.execute("""
-            INSERT INTO test.parts
+            INSERT INTO parts
             (estimate_id, no, part_official_name, unit_price)
             VALUES (%s, %s, %s, %s)
         """, (
@@ -1003,7 +1003,7 @@ def insert_estimate(conn, estimate_id: str, data: dict):
     # labor
     for idx, l in enumerate(data.get("labor", []), start=1):
         cur.execute("""
-            INSERT INTO test.labor
+            INSERT INTO labor
             (estimate_id, no, repair_content, tech_fee)
             VALUES (%s, %s, %s, %s)
         """, (

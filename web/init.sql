@@ -4,14 +4,13 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
-CREATE SCHEMA IF NOT EXISTS test;
-SET search_path TO test, public;
+SET search_path TO public;
 
 -- =====================================
 -- 2. Master Tables (Reference Data)
 -- =====================================
 
-CREATE TABLE test.parts_master (
+CREATE TABLE parts_master (
     part_official_name VARCHAR NOT NULL,
     car_type VARCHAR NOT NULL,
     extracted_at DATE NOT NULL,
@@ -20,7 +19,7 @@ CREATE TABLE test.parts_master (
     PRIMARY KEY (part_official_name, car_type, extracted_at)
 );
 
-CREATE TABLE test.labor_master (
+CREATE TABLE labor_master (
     repair_content VARCHAR NOT NULL,
     car_type VARCHAR NOT NULL,
     start_date DATE NOT NULL,
@@ -35,7 +34,7 @@ CREATE TABLE test.labor_master (
 -- 3. Customer
 -- =====================================
 
-CREATE TABLE test.customer (
+CREATE TABLE customer (
     id VARCHAR PRIMARY KEY,
     name VARCHAR,
     password VARCHAR
@@ -45,7 +44,7 @@ CREATE TABLE test.customer (
 -- 4. Estimates (Header)
 -- =====================================
 
-CREATE TABLE test.estimates (
+CREATE TABLE estimates (
     id VARCHAR PRIMARY KEY,
     customer_id VARCHAR NOT NULL,
     image_url VARCHAR,
@@ -54,38 +53,38 @@ CREATE TABLE test.estimates (
     service_finish_at DATE,
     created_at TIMESTAMP DEFAULT NOW(),
     FOREIGN KEY (customer_id)
-        REFERENCES test.customer(id)
+        REFERENCES customer(id)
 );
 
 -- =====================================
 -- 5. Detail Tables
 -- =====================================
 
-CREATE TABLE test.parts (
+CREATE TABLE parts (
     estimate_id VARCHAR NOT NULL,
     no INT NOT NULL,
     part_official_name VARCHAR,
     unit_price INT,
     PRIMARY KEY (estimate_id, no),
     FOREIGN KEY (estimate_id)
-        REFERENCES test.estimates(id)
+        REFERENCES estimates(id)
 );
 
-CREATE TABLE test.labor (
+CREATE TABLE labor (
     estimate_id VARCHAR NOT NULL,
     no INT NOT NULL,
     repair_content VARCHAR,
     tech_fee INT,
     PRIMARY KEY (estimate_id, no),
     FOREIGN KEY (estimate_id)
-        REFERENCES test.estimates(id)
+        REFERENCES estimates(id)
 );
 
 -- =====================================
 -- 6. RAG Document Chunks (test 스키마로 이동)
 -- =====================================
 
-CREATE TABLE test.repair_doc_chunks (
+CREATE TABLE repair_doc (
     id BIGSERIAL PRIMARY KEY,
     document_source TEXT NOT NULL,
     vehicle_model TEXT NOT NULL,
@@ -98,26 +97,26 @@ CREATE TABLE test.repair_doc_chunks (
     UNIQUE(vehicle_model, symptom_text, repair_parts, evidence_text)
 );
 
-CREATE INDEX repair_doc_chunks_model_idx ON test.repair_doc_chunks(vehicle_model);
+CREATE INDEX repair_doc_model_idx ON repair_doc(vehicle_model);
 
 -- =====================================
 -- 7. Sample Data Insert
 -- =====================================
 
 -- Master 데이터
-INSERT INTO test.parts_master VALUES
+INSERT INTO parts_master VALUES
 ('필터 에어 클리너', '엑센트(RB)', '2026-02-16', 5810, 7000),
 ('서비스 키트-오일 필터', '엑센트(RB)', '2026-02-16', 6820, 8750);
 
-INSERT INTO test.labor_master VALUES
+INSERT INTO labor_master VALUES
 ('계기판 교환', '엑센트(RB)', '2026-01-01', '9999-12-31', 0.9, 132000, 40000);
 
 -- 고객
-INSERT INTO test.customer VALUES
+INSERT INTO customer VALUES
 ('test@example.com', '홍길동', '1234');
 
 -- 견적서
-INSERT INTO test.estimates (
+INSERT INTO estimates (
     id, customer_id, image_url, car_type, car_mileage, service_finish_at
 ) VALUES
 (
@@ -138,17 +137,17 @@ INSERT INTO test.estimates (
 );
 
 -- 부품 상세
-INSERT INTO test.parts VALUES
+INSERT INTO parts VALUES
 ('EST_20260216_001', 1, '필터 에어 클리너', 6000),
 ('EST_20260216_001', 2, '서비스 키트-오일 필터', 10000);
 
 -- 공임 상세
-INSERT INTO test.labor VALUES
+INSERT INTO labor VALUES
 ('EST_20260216_001', 1, '계기판 교환', 150000),
 ('EST_20260216_002', 1, '계기판 교환', 120000);
 
 -- RAG 근거 문서 샘플
-INSERT INTO test.repair_doc_chunks (
+INSERT INTO repair_doc (
     document_source, vehicle_model, symptom_text, system_category,
     repair_parts, pre_replace_check_rule, evidence_text
 ) VALUES
