@@ -1,6 +1,8 @@
 <div align="center">
   <h1>RAG Pipeline</h1>
   <p><b>정비 문서 기반 과잉정비 판단 보조를 위한 RAG 지식베이스 구성</b></p>
+  <p>2개의 LLM Agent가 검색-검증-판정 흐름에서 협력하여 근거 문서를 선별하고 최종 진단을 생성합니다.</p>
+  <img src="../../images/rag_agent.png" width="85%" alt="RAG Agent Flow">
 </div>
 
 ---
