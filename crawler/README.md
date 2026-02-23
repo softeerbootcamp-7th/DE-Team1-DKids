@@ -204,7 +204,7 @@ raw/
 
 <hr/>
 
-<h2>6. DynamoDB 로그 구조 (옵션)</h2>
+<h2>6. DynamoDB 로그 구조 </h2>
 
 <h3>Key 설계</h3>
 
